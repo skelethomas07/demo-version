@@ -1,0 +1,62 @@
+{
+  "historical_p3ht_rows": 431,
+  "historical_p3ht_papers": 62,
+  "domain_training_rows": 165,
+  "domain_training_papers": 21,
+  "domain_filters": [
+    "Process=spin-coating",
+    "Cation=emim",
+    "polymer contains pvdf-hfp"
+  ],
+  "external_publication_start": "2026-06-01",
+  "selected_physics_on": {
+    "candidate": "et_leaf2_mf050_s3",
+    "physics_variant": "physics_on",
+    "mean_mae_log1p": 1.8276415258725252,
+    "std_mae_log1p": 0.22227664307644818,
+    "mean_mape_percent": 491.3300735987723
+  },
+  "selected_physics_off": {
+    "candidate": "et_leaf4_mf065_s10",
+    "physics_variant": "physics_off",
+    "mean_mae_log1p": 1.8345379480084283,
+    "std_mae_log1p": 0.26339909015661034,
+    "mean_mape_percent": 459.71188375495694
+  },
+  "physics_ablation_grouped_cv": {
+    "physics_on_mean_mae_log1p": 1.8276415258725252,
+    "physics_off_mean_mae_log1p": 1.8345379480084283
+  },
+  "external_physics_on_all": {
+    "n_rows": 3,
+    "n_papers": 1,
+    "mape_percent": 218.41596599905634,
+    "median_ape_percent": 163.97425753412855,
+    "median_factor_error": 2.6397425753412853,
+    "mae_log1p": 0.9381814915935051,
+    "rmse_log1p": 1.160403966606889
+  },
+  "external_physics_on_nearest_third": {
+    "n_rows": 1,
+    "n_papers": 1,
+    "mape_percent": 163.97425753412855,
+    "median_ape_percent": 163.97425753412855,
+    "median_factor_error": 2.6397425753412853,
+    "mae_log1p": 0.9691540082406176,
+    "rmse_log1p": 0.9691540082406176
+  },
+  "external_physics_off_all": {
+    "n_rows": 3,
+    "n_papers": 1,
+    "mape_percent": 204.52667490800604,
+    "median_ape_percent": 164.40128885966857,
+    "median_factor_error": 2.6440128885966856,
+    "mae_log1p": 0.9655801648661804,
+    "rmse_log1p": 1.111578471540267
+  },
+  "nearest_validation_ids": [
+    "wan2026_tfsi"
+  ],
+  "selection_rule": "candidate chosen by mean paper-grouped historical MAE_log1p; external targets excluded",
+  "nearest_subset_rule": "top one-third by mean five-neighbor input similarity; Tau_ms and prediction errors excluded"
+}

@@ -394,6 +394,11 @@ def add_engineered_features(df: pd.DataFrame) -> pd.DataFrame:
 
     df["diffusion_viscosity_ratio"] = ion_diff / (ion_visc + eps)
     df["ion_mobility_proxy"] = ion_diff / (ion_visc + eps)
+    df["log1p_ion_diffusion"] = np.log1p(ion_diff.clip(lower=0))
+    df["log1p_ion_viscosity"] = np.log1p(ion_visc.clip(lower=0))
+    pulse_seconds = pulse_w.clip(lower=0) / 1000.0
+    df["diffusion_length_proxy"] = np.sqrt(ion_diff.clip(lower=0) * pulse_seconds)
+    df["radius_diffusion_time_proxy"] = df["radius_sum"].pow(2) / (ion_diff + eps)
 
     df["annealing_thermal_budget"] = ann_temp * ann_time
     df["log1p_annealing_time_h"] = np.log1p(ann_time.clip(lower=0))

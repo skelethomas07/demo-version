@@ -8,6 +8,12 @@ import numpy as np
 import pandas as pd
 import streamlit as st
 
+from condition_recommender import (
+    INTEGER_FIELDS,
+    RECOMMENDABLE_FIELDS,
+    default_search_bounds,
+    recommend_conditions,
+)
 from model_utils import (
     KNOWN_CATEGORICAL_COLS,
     RAW_INPUT_COLS,
@@ -492,6 +498,197 @@ def render_result(
     st.markdown('</div>', unsafe_allow_html=True)
 
 
+def render_recommendations(
+    recommendations: pd.DataFrame,
+    tunable_fields: list[str],
+    bundle: Dict[str, Any],
+) -> None:
+    """Render target-matching condition candidates and their local drivers."""
+    if recommendations.empty:
+        st.warning("No recommendation candidates were generated.")
+        return
+
+    st.markdown(
+        """
+        <div class="section-card">
+            <div class="section-title">Recommended condition candidates</div>
+            <div class="section-desc">Candidates are ranked by distance from the target retention time. Review physical feasibility before fabrication.</div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    display_cols = ["rank", *tunable_fields, "pred_tau_ms", "target_error_percent"]
+    display = recommendations[display_cols].rename(
+        columns={
+            "rank": "Rank",
+            "pred_tau_ms": "Predicted retention (ms)",
+            "target_error_percent": "Target difference (%)",
+            **{field: FIELD_LABELS.get(field, field) for field in tunable_fields},
+        }
+    )
+    st.dataframe(
+        display.style.format(
+            {
+                "Predicted retention (ms)": "{:,.3g}",
+                "Target difference (%)": "{:.2f}",
+            }
+        ),
+        use_container_width=True,
+        hide_index=True,
+    )
+
+    st.markdown("### Candidate details and input drivers")
+    for _, row in recommendations.iterrows():
+        rank = int(row["rank"])
+        predicted = float(row["pred_tau_ms"])
+        error = float(row["target_error_percent"])
+        candidate_input = {
+            col: row.get(col, np.nan)
+            for col in RAW_INPUT_COLS
+        }
+        drivers = explain_prediction_local(candidate_input, bundle, top_n=5)
+        with st.expander(
+            f"Candidate {rank}: {predicted:,.3g} ms, target difference {error:.2f}%",
+            expanded=rank == 1,
+        ):
+            condition_rows = []
+            for field in tunable_fields:
+                condition_rows.append(
+                    {
+                        "Condition": FIELD_LABELS.get(field, field),
+                        "Recommended value": _format_driver_value(row.get(field)),
+                    }
+                )
+            st.dataframe(pd.DataFrame(condition_rows), use_container_width=True, hide_index=True)
+            render_driver_panel(drivers)
+
+
+def render_condition_recommender(bundle: Dict[str, Any]) -> None:
+    st.markdown(
+        """
+        <div class="section-card">
+            <div class="section-title">Target-driven condition recommendation</div>
+            <div class="section-desc">Enter the conditions that must remain fixed, choose the controllable fields the engine may change, and set a target retention time.</div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+    base_conditions = collect_inputs(bundle, key_prefix="recommend")
+    available_fields = [
+        field
+        for field in RECOMMENDABLE_FIELDS
+        if field in bundle.get("schema", {}).get("numeric_stats", {})
+    ]
+    if not is_spin_process_value(base_conditions.get("Process")):
+        available_fields = [field for field in available_fields if field != "Spin_RPM"]
+
+    st.markdown(
+        '<div class="section-card"><div class="section-title">Search target</div><div class="section-desc">Only selected fields are changed. Every other input remains fixed.</div>',
+        unsafe_allow_html=True,
+    )
+    target_raw = st.text_input(
+        "Target retention time (ms)",
+        value="1000",
+        key="recommend_target_tau_ms",
+    )
+    default_tunable = [
+        field
+        for field in [
+            "Annealing_temp_C",
+            "Annealing_time_h",
+            "Gate_voltage_V",
+            "Gate_pulse_width_ms",
+            "Pulse_number",
+        ]
+        if field in available_fields
+    ]
+    tunable_fields = st.multiselect(
+        "Conditions the engine may change",
+        options=available_fields,
+        default=default_tunable,
+        format_func=lambda field: FIELD_LABELS.get(field, field),
+        help="Material and ion descriptors remain fixed. Select only conditions that can be adjusted in the planned experiment.",
+        key="recommend_tunable_fields",
+    )
+    suggested_bounds = default_search_bounds(base_conditions, tunable_fields, bundle)
+    search_bounds: Dict[str, tuple[float, float]] = {}
+    if tunable_fields:
+        st.markdown("#### Engineer-approved search ranges")
+        st.caption("The engine will not recommend values outside these ranges or outside the model training range.")
+        for field in tunable_fields:
+            stats = bundle["schema"]["numeric_stats"][field]
+            training_low = float(stats["min"])
+            training_high = float(stats["max"])
+            suggested_low, suggested_high = suggested_bounds[field]
+            left, right = st.columns(2)
+            if field in INTEGER_FIELDS:
+                with left:
+                    low_value = st.number_input(
+                        f"{FIELD_LABELS.get(field, field)} minimum",
+                        min_value=int(np.ceil(training_low)),
+                        max_value=int(np.floor(training_high)),
+                        value=int(np.ceil(suggested_low)),
+                        step=1,
+                        key=f"recommend_bound_{field}_min",
+                    )
+                with right:
+                    high_value = st.number_input(
+                        f"{FIELD_LABELS.get(field, field)} maximum",
+                        min_value=int(np.ceil(training_low)),
+                        max_value=int(np.floor(training_high)),
+                        value=int(np.floor(suggested_high)),
+                        step=1,
+                        key=f"recommend_bound_{field}_max",
+                    )
+            else:
+                step = max((training_high - training_low) / 1000.0, 1e-6)
+                with left:
+                    low_value = st.number_input(
+                        f"{FIELD_LABELS.get(field, field)} minimum",
+                        min_value=training_low,
+                        max_value=training_high,
+                        value=float(suggested_low),
+                        step=float(step),
+                        key=f"recommend_bound_{field}_min",
+                    )
+                with right:
+                    high_value = st.number_input(
+                        f"{FIELD_LABELS.get(field, field)} maximum",
+                        min_value=training_low,
+                        max_value=training_high,
+                        value=float(suggested_high),
+                        step=float(step),
+                        key=f"recommend_bound_{field}_max",
+                    )
+            search_bounds[field] = (float(low_value), float(high_value))
+    run = st.button("Recommend conditions", type="primary", key="run_recommendation")
+    st.markdown("</div>", unsafe_allow_html=True)
+
+    if not run:
+        return
+    try:
+        target_tau_ms = parse_float(target_raw)
+        if target_tau_ms is None:
+            raise ValueError("Target retention time is required.")
+        with st.spinner("Searching model-supported condition candidates..."):
+            recommendations = recommend_conditions(
+                base_conditions=base_conditions,
+                target_tau_ms=target_tau_ms,
+                tunable_fields=tunable_fields,
+                bundle=bundle,
+                n_candidates=3000,
+                top_k=5,
+                random_state=42,
+                search_bounds=search_bounds,
+            )
+        render_recommendations(recommendations, tunable_fields, bundle)
+    except ValueError as exc:
+        st.error(str(exc))
+    except Exception as exc:
+        st.error(f"Condition recommendation failed: {exc}")
+
+
 # -----------------------------------------------------------------------------
 # External dataset submission backend (Supabase)
 # -----------------------------------------------------------------------------
@@ -683,7 +880,9 @@ def main() -> None:
         unsafe_allow_html=True,
     )
 
-    predict_tab, contribute_tab = st.tabs(["Estimate retention time", "Add experimental result"])
+    predict_tab, recommend_tab, contribute_tab = st.tabs(
+        ["Estimate retention time", "Recommend conditions", "Add experimental result"]
+    )
 
     with predict_tab:
         input_col, result_col = st.columns([1.62, 0.88], gap="large")
@@ -697,6 +896,9 @@ def main() -> None:
                 result = predict_retention_time(user_input, bundle)
                 driver_result = explain_prediction_local(user_input, bundle, top_n=5)
             render_result(result, user_input if 'user_input' in locals() else {}, bundle, driver_result)
+
+    with recommend_tab:
+        render_condition_recommender(bundle)
 
     with contribute_tab:
         render_submit_experiment(bundle)
