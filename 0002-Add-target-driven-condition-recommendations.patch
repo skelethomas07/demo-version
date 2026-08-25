@@ -1,0 +1,659 @@
+From 91f53bba0f06c8d56f62cc99e0c24f74a2c0e1ca Mon Sep 17 00:00:00 2001
+From: Codex <codex@openai.com>
+Date: Tue, 25 Aug 2026 19:32:42 +0700
+Subject: [PATCH 2/2] Add target-driven condition recommendations
+
+---
+ README.md                           |  13 ++
+ app.py                              | 204 ++++++++++++++++++++++++++-
+ condition_recommender.py            | 207 ++++++++++++++++++++++++++++
+ tests/test_condition_recommender.py | 163 ++++++++++++++++++++++
+ 4 files changed, 586 insertions(+), 1 deletion(-)
+ create mode 100644 condition_recommender.py
+ create mode 100644 tests/test_condition_recommender.py
+
+diff --git a/README.md b/README.md
+index c9386eb..1615109 100644
+--- a/README.md
++++ b/README.md
+@@ -7,6 +7,19 @@ A Streamlit web app for condition-to-retention prediction of electrolyte-gated s
+ - Material, process, electrolyte, ion, and operation conditions are entered by the user.
+ - The trained Stacking Ensemble model predicts `Tau_ms`.
+ - The **Input drivers** tab shows the top 5 input fields that most changed the current prediction.
++- The **Recommend conditions** tab keeps engineer-selected inputs fixed and searches adjustable process and operation conditions for a requested `Tau_ms`.
++- The five closest candidates show predicted retention, target difference, changed conditions, and local input-driver rankings.
++
++## Target-driven condition recommendation
++
++1. Enter the material, ion, process, and operation values that describe the planned device.
++2. Enter the target retention time in milliseconds.
++3. Select only the controllable fields the engine may change.
++4. Review or edit the minimum and maximum search range for each selected condition.
++5. Run the search to evaluate 3,000 condition combinations inside both the engineer-approved ranges and the model's recorded training ranges.
++6. Review the top five candidates and their input drivers before deciding which experiment to run.
++
++The recommender is a model-based design aid, not a physical-validity guarantee. Material and ion descriptors are held fixed, and an engineer must review each proposed combination before fabrication.
+ 
+ ## Input driver method
+ 
+diff --git a/app.py b/app.py
+index 079e6fb..040ddc2 100644
+--- a/app.py
++++ b/app.py
+@@ -8,6 +8,12 @@ import numpy as np
+ import pandas as pd
+ import streamlit as st
+ 
++from condition_recommender import (
++    INTEGER_FIELDS,
++    RECOMMENDABLE_FIELDS,
++    default_search_bounds,
++    recommend_conditions,
++)
+ from model_utils import (
+     KNOWN_CATEGORICAL_COLS,
+     RAW_INPUT_COLS,
+@@ -492,6 +498,197 @@ def render_result(
+     st.markdown('</div>', unsafe_allow_html=True)
+ 
+ 
++def render_recommendations(
++    recommendations: pd.DataFrame,
++    tunable_fields: list[str],
++    bundle: Dict[str, Any],
++) -> None:
++    """Render target-matching condition candidates and their local drivers."""
++    if recommendations.empty:
++        st.warning("No recommendation candidates were generated.")
++        return
++
++    st.markdown(
++        """
++        <div class="section-card">
++            <div class="section-title">Recommended condition candidates</div>
++            <div class="section-desc">Candidates are ranked by distance from the target retention time. Review physical feasibility before fabrication.</div>
++        </div>
++        """,
++        unsafe_allow_html=True,
++    )
++
++    display_cols = ["rank", *tunable_fields, "pred_tau_ms", "target_error_percent"]
++    display = recommendations[display_cols].rename(
++        columns={
++            "rank": "Rank",
++            "pred_tau_ms": "Predicted retention (ms)",
++            "target_error_percent": "Target difference (%)",
++            **{field: FIELD_LABELS.get(field, field) for field in tunable_fields},
++        }
++    )
++    st.dataframe(
++        display.style.format(
++            {
++                "Predicted retention (ms)": "{:,.3g}",
++                "Target difference (%)": "{:.2f}",
++            }
++        ),
++        use_container_width=True,
++        hide_index=True,
++    )
++
++    st.markdown("### Candidate details and input drivers")
++    for _, row in recommendations.iterrows():
++        rank = int(row["rank"])
++        predicted = float(row["pred_tau_ms"])
++        error = float(row["target_error_percent"])
++        candidate_input = {
++            col: row.get(col, np.nan)
++            for col in RAW_INPUT_COLS
++        }
++        drivers = explain_prediction_local(candidate_input, bundle, top_n=5)
++        with st.expander(
++            f"Candidate {rank}: {predicted:,.3g} ms, target difference {error:.2f}%",
++            expanded=rank == 1,
++        ):
++            condition_rows = []
++            for field in tunable_fields:
++                condition_rows.append(
++                    {
++                        "Condition": FIELD_LABELS.get(field, field),
++                        "Recommended value": _format_driver_value(row.get(field)),
++                    }
++                )
++            st.dataframe(pd.DataFrame(condition_rows), use_container_width=True, hide_index=True)
++            render_driver_panel(drivers)
++
++
++def render_condition_recommender(bundle: Dict[str, Any]) -> None:
++    st.markdown(
++        """
++        <div class="section-card">
++            <div class="section-title">Target-driven condition recommendation</div>
++            <div class="section-desc">Enter the conditions that must remain fixed, choose the controllable fields the engine may change, and set a target retention time.</div>
++        </div>
++        """,
++        unsafe_allow_html=True,
++    )
++    base_conditions = collect_inputs(bundle, key_prefix="recommend")
++    available_fields = [
++        field
++        for field in RECOMMENDABLE_FIELDS
++        if field in bundle.get("schema", {}).get("numeric_stats", {})
++    ]
++    if not is_spin_process_value(base_conditions.get("Process")):
++        available_fields = [field for field in available_fields if field != "Spin_RPM"]
++
++    st.markdown(
++        '<div class="section-card"><div class="section-title">Search target</div><div class="section-desc">Only selected fields are changed. Every other input remains fixed.</div>',
++        unsafe_allow_html=True,
++    )
++    target_raw = st.text_input(
++        "Target retention time (ms)",
++        value="1000",
++        key="recommend_target_tau_ms",
++    )
++    default_tunable = [
++        field
++        for field in [
++            "Annealing_temp_C",
++            "Annealing_time_h",
++            "Gate_voltage_V",
++            "Gate_pulse_width_ms",
++            "Pulse_number",
++        ]
++        if field in available_fields
++    ]
++    tunable_fields = st.multiselect(
++        "Conditions the engine may change",
++        options=available_fields,
++        default=default_tunable,
++        format_func=lambda field: FIELD_LABELS.get(field, field),
++        help="Material and ion descriptors remain fixed. Select only conditions that can be adjusted in the planned experiment.",
++        key="recommend_tunable_fields",
++    )
++    suggested_bounds = default_search_bounds(base_conditions, tunable_fields, bundle)
++    search_bounds: Dict[str, tuple[float, float]] = {}
++    if tunable_fields:
++        st.markdown("#### Engineer-approved search ranges")
++        st.caption("The engine will not recommend values outside these ranges or outside the model training range.")
++        for field in tunable_fields:
++            stats = bundle["schema"]["numeric_stats"][field]
++            training_low = float(stats["min"])
++            training_high = float(stats["max"])
++            suggested_low, suggested_high = suggested_bounds[field]
++            left, right = st.columns(2)
++            if field in INTEGER_FIELDS:
++                with left:
++                    low_value = st.number_input(
++                        f"{FIELD_LABELS.get(field, field)} minimum",
++                        min_value=int(np.ceil(training_low)),
++                        max_value=int(np.floor(training_high)),
++                        value=int(np.ceil(suggested_low)),
++                        step=1,
++                        key=f"recommend_bound_{field}_min",
++                    )
++                with right:
++                    high_value = st.number_input(
++                        f"{FIELD_LABELS.get(field, field)} maximum",
++                        min_value=int(np.ceil(training_low)),
++                        max_value=int(np.floor(training_high)),
++                        value=int(np.floor(suggested_high)),
++                        step=1,
++                        key=f"recommend_bound_{field}_max",
++                    )
++            else:
++                step = max((training_high - training_low) / 1000.0, 1e-6)
++                with left:
++                    low_value = st.number_input(
++                        f"{FIELD_LABELS.get(field, field)} minimum",
++                        min_value=training_low,
++                        max_value=training_high,
++                        value=float(suggested_low),
++                        step=float(step),
++                        key=f"recommend_bound_{field}_min",
++                    )
++                with right:
++                    high_value = st.number_input(
++                        f"{FIELD_LABELS.get(field, field)} maximum",
++                        min_value=training_low,
++                        max_value=training_high,
++                        value=float(suggested_high),
++                        step=float(step),
++                        key=f"recommend_bound_{field}_max",
++                    )
++            search_bounds[field] = (float(low_value), float(high_value))
++    run = st.button("Recommend conditions", type="primary", key="run_recommendation")
++    st.markdown("</div>", unsafe_allow_html=True)
++
++    if not run:
++        return
++    try:
++        target_tau_ms = parse_float(target_raw)
++        if target_tau_ms is None:
++            raise ValueError("Target retention time is required.")
++        with st.spinner("Searching model-supported condition candidates..."):
++            recommendations = recommend_conditions(
++                base_conditions=base_conditions,
++                target_tau_ms=target_tau_ms,
++                tunable_fields=tunable_fields,
++                bundle=bundle,
++                n_candidates=3000,
++                top_k=5,
++                random_state=42,
++                search_bounds=search_bounds,
++            )
++        render_recommendations(recommendations, tunable_fields, bundle)
++    except ValueError as exc:
++        st.error(str(exc))
++    except Exception as exc:
++        st.error(f"Condition recommendation failed: {exc}")
++
++
+ # -----------------------------------------------------------------------------
+ # External dataset submission backend (Supabase)
+ # -----------------------------------------------------------------------------
+@@ -683,7 +880,9 @@ def main() -> None:
+         unsafe_allow_html=True,
+     )
+ 
+-    predict_tab, contribute_tab = st.tabs(["Estimate retention time", "Add experimental result"])
++    predict_tab, recommend_tab, contribute_tab = st.tabs(
++        ["Estimate retention time", "Recommend conditions", "Add experimental result"]
++    )
+ 
+     with predict_tab:
+         input_col, result_col = st.columns([1.62, 0.88], gap="large")
+@@ -698,6 +897,9 @@ def main() -> None:
+                 driver_result = explain_prediction_local(user_input, bundle, top_n=5)
+             render_result(result, user_input if 'user_input' in locals() else {}, bundle, driver_result)
+ 
++    with recommend_tab:
++        render_condition_recommender(bundle)
++
+     with contribute_tab:
+         render_submit_experiment(bundle)
+ 
+diff --git a/condition_recommender.py b/condition_recommender.py
+new file mode 100644
+index 0000000..52930c4
+--- /dev/null
++++ b/condition_recommender.py
+@@ -0,0 +1,207 @@
++"""Target-driven condition search for the retention-time platform.
++
++The recommender keeps material descriptors fixed and searches only process
++and operating conditions that an engineer can intentionally adjust. Candidate
++values stay inside the numerical ranges recorded in the trained model schema.
++"""
++from __future__ import annotations
++
++from typing import Any, Dict, Mapping, Optional, Sequence, Tuple
++
++import numpy as np
++import pandas as pd
++
++from model_utils import is_spin_process_value, prepare_input_for_model
++
++
++RECOMMENDABLE_FIELDS = [
++    "Concentration_mg_ml",
++    "Spin_RPM",
++    "Annealing_temp_C",
++    "Annealing_time_h",
++    "wt",
++    "Gate_voltage_V",
++    "Drain_voltage_V",
++    "Gate_pulse_width_ms",
++    "Pulse_number",
++    "Operating_temp_C",
++]
++
++INTEGER_FIELDS = {"Spin_RPM", "Pulse_number"}
++
++
++def default_search_bounds(
++    base_conditions: Dict[str, Any],
++    tunable_fields: Sequence[str],
++    bundle: Dict[str, Any],
++) -> Dict[str, tuple[float, float]]:
++    """Build a local default window around the engineer's starting condition."""
++    numeric_stats = bundle.get("schema", {}).get("numeric_stats", {})
++    bounds: Dict[str, tuple[float, float]] = {}
++    for field in tunable_fields:
++        stats = numeric_stats[field]
++        training_low = float(stats["min"])
++        training_high = float(stats["max"])
++        try:
++            center = float(base_conditions.get(field))
++        except (TypeError, ValueError):
++            center = float(stats.get("median", (training_low + training_high) / 2.0))
++        if not np.isfinite(center):
++            center = float(stats.get("median", (training_low + training_high) / 2.0))
++        center = float(np.clip(center, training_low, training_high))
++        span = training_high - training_low
++        half_width = abs(center) * 0.20
++        if half_width == 0:
++            half_width = span * 0.05
++        if field in INTEGER_FIELDS:
++            half_width = max(half_width, 1.0)
++        low = max(training_low, center - half_width)
++        high = min(training_high, center + half_width)
++        if low >= high:
++            low, high = training_low, training_high
++        bounds[field] = (float(low), float(high))
++    return bounds
++
++
++def validate_recommendation_request(
++    target_tau_ms: float,
++    tunable_fields: Sequence[str],
++    bundle: Dict[str, Any],
++) -> None:
++    """Validate target and search fields before candidate generation."""
++    try:
++        target = float(target_tau_ms)
++    except (TypeError, ValueError) as exc:
++        raise ValueError("Target retention time must be a valid number.") from exc
++    if not np.isfinite(target) or target <= 0:
++        raise ValueError("Target retention time must be greater than 0.")
++    if not tunable_fields:
++        raise ValueError("Select at least one condition to optimize.")
++    if len(set(tunable_fields)) != len(tunable_fields):
++        raise ValueError("Tunable conditions must not contain duplicates.")
++
++    numeric_stats = bundle.get("schema", {}).get("numeric_stats", {})
++    for field in tunable_fields:
++        if field not in RECOMMENDABLE_FIELDS:
++            raise ValueError(f"{field} is not recommendable as an independent condition.")
++        stats = numeric_stats.get(field, {})
++        low = stats.get("min")
++        high = stats.get("max")
++        if low is None or high is None or not np.isfinite(float(low)) or not np.isfinite(float(high)):
++            raise ValueError(f"Training range is unavailable for {field}.")
++        if float(low) > float(high):
++            raise ValueError(f"Training range is invalid for {field}.")
++
++
++def _resolve_search_range(
++    field: str,
++    stats: Dict[str, Any],
++    search_bounds: Optional[Mapping[str, Tuple[float, float]]],
++) -> tuple[float, float]:
++    training_low = float(stats["min"])
++    training_high = float(stats["max"])
++    if not search_bounds or field not in search_bounds:
++        return training_low, training_high
++
++    try:
++        low, high = (float(value) for value in search_bounds[field])
++    except (TypeError, ValueError) as exc:
++        raise ValueError(f"Search range for {field} must contain two numbers.") from exc
++    if not np.isfinite(low) or not np.isfinite(high) or low >= high:
++        raise ValueError(f"Search range for {field} must have a lower value smaller than the upper value.")
++    if low < training_low or high > training_high:
++        raise ValueError(
++            f"Search range for {field} must stay inside the training range "
++            f"({training_low:g} to {training_high:g})."
++        )
++    return low, high
++
++
++def _seed_values(stats: Dict[str, Any], base_value: Any, low: float, high: float) -> list[float]:
++    values = [low, high, stats.get("median"), stats.get("mean"), base_value]
++    seeded: list[float] = []
++    for value in values:
++        try:
++            number = float(value)
++        except (TypeError, ValueError):
++            continue
++        if np.isfinite(number) and low <= number <= high and number not in seeded:
++            seeded.append(number)
++    return seeded
++
++
++def generate_candidate_conditions(
++    base_conditions: Dict[str, Any],
++    tunable_fields: Sequence[str],
++    bundle: Dict[str, Any],
++    n_candidates: int = 2000,
++    random_state: int = 42,
++    search_bounds: Optional[Mapping[str, Tuple[float, float]]] = None,
++) -> pd.DataFrame:
++    """Generate deterministic in-range candidates while preserving fixed fields."""
++    validate_recommendation_request(1.0, tunable_fields, bundle)
++    if int(n_candidates) < 5:
++        raise ValueError("n_candidates must be at least 5.")
++    if "Spin_RPM" in tunable_fields and not is_spin_process_value(base_conditions.get("Process")):
++        raise ValueError("Spin_RPM can only be optimized for a spin-based process.")
++
++    count = int(n_candidates)
++    rng = np.random.default_rng(random_state)
++    candidates = pd.DataFrame([dict(base_conditions) for _ in range(count)])
++    numeric_stats = bundle["schema"]["numeric_stats"]
++
++    for field in tunable_fields:
++        stats = numeric_stats[field]
++        low, high = _resolve_search_range(field, stats, search_bounds)
++        values = rng.uniform(low, high, size=count) if high > low else np.full(count, low)
++        seeds = _seed_values(stats, base_conditions.get(field), low, high)
++        values[: min(len(seeds), count)] = seeds[:count]
++        values = np.clip(values, low, high)
++        if field in INTEGER_FIELDS:
++            values = np.rint(values).astype(int)
++        candidates[field] = values
++
++    return candidates
++
++
++def recommend_conditions(
++    base_conditions: Dict[str, Any],
++    target_tau_ms: float,
++    tunable_fields: Sequence[str],
++    bundle: Dict[str, Any],
++    n_candidates: int = 2000,
++    top_k: int = 5,
++    random_state: int = 42,
++    search_bounds: Optional[Mapping[str, Tuple[float, float]]] = None,
++) -> pd.DataFrame:
++    """Return candidates ranked by distance from the requested retention time."""
++    validate_recommendation_request(target_tau_ms, tunable_fields, bundle)
++    if int(top_k) <= 0:
++        raise ValueError("top_k must be greater than 0.")
++
++    candidates = generate_candidate_conditions(
++        base_conditions=base_conditions,
++        tunable_fields=tunable_fields,
++        bundle=bundle,
++        n_candidates=n_candidates,
++        random_state=random_state,
++        search_bounds=search_bounds,
++    )
++    prepared = prepare_input_for_model(candidates, bundle)
++    pred_log = np.asarray(bundle["model"].predict(prepared), dtype=float)
++    pred_tau = np.maximum(np.expm1(pred_log), 0.0)
++    target = float(target_tau_ms)
++
++    ranked = candidates.copy()
++    ranked["target_tau_ms"] = target
++    ranked["pred_tau_ms"] = pred_tau
++    ranked["absolute_log_error"] = np.abs(pred_log - np.log1p(target))
++    ranked["target_error_percent"] = np.abs(pred_tau - target) / target * 100.0
++    ranked = ranked.sort_values(
++        ["absolute_log_error", "target_error_percent"],
++        kind="stable",
++    )
++    ranked = ranked.drop_duplicates(subset=list(tunable_fields), keep="first")
++    ranked = ranked.head(min(int(top_k), len(ranked))).reset_index(drop=True)
++    ranked.insert(0, "rank", np.arange(1, len(ranked) + 1, dtype=int))
++    return ranked
+diff --git a/tests/test_condition_recommender.py b/tests/test_condition_recommender.py
+new file mode 100644
+index 0000000..fca3484
+--- /dev/null
++++ b/tests/test_condition_recommender.py
+@@ -0,0 +1,163 @@
++from __future__ import annotations
++
++import unittest
++
++import numpy as np
++
++from condition_recommender import (
++    RECOMMENDABLE_FIELDS,
++    default_search_bounds,
++    generate_candidate_conditions,
++    recommend_conditions,
++    validate_recommendation_request,
++)
++
++
++class GateVoltageModel:
++    """Small real predictor used to exercise the recommendation ranking."""
++
++    def predict(self, frame):
++        gate_voltage = frame["Gate_voltage_V"].astype(float).to_numpy()
++        return np.log1p(gate_voltage * 100.0)
++
++
++def make_bundle():
++    return {
++        "model": GateVoltageModel(),
++        "feature_columns": ["Channel", "Gate_voltage_V", "Drain_voltage_V"],
++        "schema": {
++            "numeric_stats": {
++                "Gate_voltage_V": {"min": 0.0, "max": 10.0, "median": 5.0, "mean": 4.0},
++                "Drain_voltage_V": {"min": 0.0, "max": 2.0, "median": 0.2, "mean": 0.3},
++                "Gate_pulse_width_ms": {"min": 0.1, "max": 50000.0, "median": 100.0, "mean": 600.0},
++            },
++            "categorical_options": {"Channel": ["P3HT", "PEDOT:PSS"]},
++        },
++    }
++
++
++class ConditionRecommenderTests(unittest.TestCase):
++    def test_default_search_bounds_stay_local_and_inside_training_range(self):
++        bounds = default_search_bounds(
++            {"Gate_voltage_V": 5.0, "Gate_pulse_width_ms": 2000.0},
++            ["Gate_voltage_V", "Gate_pulse_width_ms"],
++            make_bundle(),
++        )
++
++        self.assertEqual(bounds["Gate_voltage_V"], (4.0, 6.0))
++        self.assertEqual(bounds["Gate_pulse_width_ms"], (1600.0, 2400.0))
++
++    def test_request_rejects_nonpositive_target(self):
++        with self.assertRaisesRegex(ValueError, "greater than 0"):
++            validate_recommendation_request(0, ["Gate_voltage_V"], make_bundle())
++
++    def test_request_rejects_fields_that_are_not_controllable_conditions(self):
++        self.assertNotIn("Ion_diffusion", RECOMMENDABLE_FIELDS)
++
++        with self.assertRaisesRegex(ValueError, "not recommendable"):
++            validate_recommendation_request(
++                500.0,
++                ["Ion_diffusion"],
++                make_bundle(),
++            )
++
++    def test_candidate_generation_keeps_fixed_conditions_and_training_ranges(self):
++        base = {
++            "Channel": "P3HT",
++            "Gate_voltage_V": 1.0,
++            "Drain_voltage_V": 0.2,
++        }
++
++        candidates = generate_candidate_conditions(
++            base,
++            ["Gate_voltage_V"],
++            make_bundle(),
++            n_candidates=40,
++            random_state=7,
++        )
++
++        self.assertEqual(set(candidates["Channel"]), {"P3HT"})
++        self.assertEqual(set(candidates["Drain_voltage_V"]), {0.2})
++        self.assertGreaterEqual(candidates["Gate_voltage_V"].min(), 0.0)
++        self.assertLessEqual(candidates["Gate_voltage_V"].max(), 10.0)
++        self.assertIn(5.0, candidates["Gate_voltage_V"].tolist())
++
++    def test_candidate_generation_honors_engineer_search_bounds(self):
++        base = {
++            "Channel": "P3HT",
++            "Gate_voltage_V": 1.0,
++            "Drain_voltage_V": 0.2,
++        }
++
++        candidates = generate_candidate_conditions(
++            base,
++            ["Gate_voltage_V"],
++            make_bundle(),
++            n_candidates=40,
++            random_state=7,
++            search_bounds={"Gate_voltage_V": (3.0, 4.0)},
++        )
++
++        self.assertGreaterEqual(candidates["Gate_voltage_V"].min(), 3.0)
++        self.assertLessEqual(candidates["Gate_voltage_V"].max(), 4.0)
++        self.assertIn(3.0, candidates["Gate_voltage_V"].tolist())
++        self.assertIn(4.0, candidates["Gate_voltage_V"].tolist())
++
++    def test_recommendation_ranks_target_match_and_reports_error(self):
++        base = {
++            "Channel": "P3HT",
++            "Gate_voltage_V": 1.0,
++            "Drain_voltage_V": 0.2,
++        }
++
++        result = recommend_conditions(
++            base_conditions=base,
++            target_tau_ms=500.0,
++            tunable_fields=["Gate_voltage_V"],
++            bundle=make_bundle(),
++            n_candidates=50,
++            top_k=3,
++            random_state=11,
++        )
++
++        self.assertEqual(result.loc[0, "rank"], 1)
++        self.assertAlmostEqual(result.loc[0, "Gate_voltage_V"], 5.0)
++        self.assertAlmostEqual(result.loc[0, "pred_tau_ms"], 500.0)
++        self.assertAlmostEqual(result.loc[0, "target_error_percent"], 0.0)
++        self.assertTrue(result["absolute_log_error"].is_monotonic_increasing)
++        self.assertEqual(set(result["Channel"]), {"P3HT"})
++
++    def test_same_random_state_produces_same_recommendations(self):
++        base = {
++            "Channel": "P3HT",
++            "Gate_voltage_V": 1.0,
++            "Drain_voltage_V": 0.2,
++        }
++
++        first = recommend_conditions(
++            base,
++            425.0,
++            ["Gate_voltage_V"],
++            make_bundle(),
++            n_candidates=30,
++            top_k=2,
++            random_state=19,
++        )
++        second = recommend_conditions(
++            base,
++            425.0,
++            ["Gate_voltage_V"],
++            make_bundle(),
++            n_candidates=30,
++            top_k=2,
++            random_state=19,
++        )
++
++        self.assertEqual(
++            first[["Gate_voltage_V", "pred_tau_ms"]].to_dict("records"),
++            second[["Gate_voltage_V", "pred_tau_ms"]].to_dict("records"),
++        )
++
++
++if __name__ == "__main__":
++    unittest.main()
+-- 
+2.51.1
+

@@ -1,0 +1,2275 @@
+From f857c9cc88bb32bf756d6023cc1a292f30d9de56 Mon Sep 17 00:00:00 2001
+From: Codex <codex@openai.com>
+Date: Tue, 25 Aug 2026 16:29:59 +0900
+Subject: [PATCH 1/2] Add paper-grouped P3HT external validation
+
+---
+ EXTERNAL_VALIDATION_README.md                 | 120 +++
+ .../2026-08-25-p3ht-external-validation.md    | 167 ++++
+ external_validation.py                        | 330 ++++++++
+ external_validation_data.csv                  |  10 +
+ model_utils.py                                |   5 +
+ p3ht_validation.py                            | 782 ++++++++++++++++++
+ paper_screening_log.csv                       |  18 +
+ tests/test_external_validation.py             | 158 ++++
+ tests/test_p3ht_validation.py                 | 390 +++++++++
+ .../p3ht_external_predictions.csv             |   4 +
+ validation_results/p3ht_external_report.md    |  28 +
+ validation_results/p3ht_external_summary.json |  62 ++
+ validation_results/p3ht_grouped_cv.csv        |  81 ++
+ 13 files changed, 2155 insertions(+)
+ create mode 100644 EXTERNAL_VALIDATION_README.md
+ create mode 100644 docs/superpowers/plans/2026-08-25-p3ht-external-validation.md
+ create mode 100644 external_validation.py
+ create mode 100644 external_validation_data.csv
+ create mode 100644 p3ht_validation.py
+ create mode 100644 paper_screening_log.csv
+ create mode 100644 tests/test_external_validation.py
+ create mode 100644 tests/test_p3ht_validation.py
+ create mode 100644 validation_results/p3ht_external_predictions.csv
+ create mode 100644 validation_results/p3ht_external_report.md
+ create mode 100644 validation_results/p3ht_external_summary.json
+ create mode 100644 validation_results/p3ht_grouped_cv.csv
+
+diff --git a/EXTERNAL_VALIDATION_README.md b/EXTERNAL_VALIDATION_README.md
+new file mode 100644
+index 0000000..852bd5d
+--- /dev/null
++++ b/EXTERNAL_VALIDATION_README.md
+@@ -0,0 +1,120 @@
++# 2026 external validation package
++
++This package runs the repository's real `models/retention_model.joblib` against
++publication-held-out retention constants. The model returns `log1p(Tau_ms)`, so
++the code converts predictions with `expm1` before calculating errors.
++
++## Reproduce
++
++Run from the repository root:
++
++```bash
++python -m unittest tests/test_external_validation.py
++python external_validation.py \
++  --data external_validation_data.csv \
++  --model models/retention_model.joblib \
++  --schema models/input_schema.json \
++  --output-dir validation_results
++```
++
++The workflow creates:
++
++- `validation_results/external_validation_predictions.csv`: paper values,
++  predictions, row-level errors, missing-input counts, and out-of-domain flags.
++- `validation_results/external_validation_summary.json`: internal holdout and
++  external metrics.
++- `validation_results/external_validation_report.md`: readable result summary.
++
++## Inclusion rule
++
++The publication window is 2026-06-01 through 2026-08-25. The primary `strict`
++set includes only a directly reported PSC/EPSC decay constant. For
++multi-exponential fits, the slow component used by the original capstone data
++rule (`tau2` or `tau3`) is selected. Retained-current ratios such as “24.5% at
++1000 s” and lower bounds such as “retention >10000 s” are not treated as tau.
++
++The one `supplementary` row uses a PPF-index decay constant and is reported only
++as a sensitivity check because its target is related to, but not identical to,
++PSC retention.
++
++## Search and screening scope
++
++The screening combined publisher pages and scholarly web searches for terms
++including `ion-gated synaptic transistor`, `OECT synaptic retention`,
++`electrolyte-gated neuromorphic transistor`, `ionic decay constant`, and
++`retention tau`, restricted to the date window. `paper_screening_log.csv`
++records included and excluded candidates.
++
++“All papers” should therefore be read as all papers found within this documented
++search scope as of 2026-08-25, not a guarantee of global bibliographic
++completeness. Papers with figure-only values are not digitized into the strict
++set because that would add unreported extraction error.
++
++## Result and interpretation
++
++The strict set contains 8 conditions from 3 independent papers. Despite the
++repository's random holdout `R2_log` of 0.8898, the external result is weak:
++
++- external `R2_log1p`: -3.1900
++- external `RMSE_log1p`: 4.9220
++- median multiplicative error: 150.331x
++- within 3x: 25.0%
++- MAPE: 84.3%
++
++This result should not be presented as successful external validation. The row
++audit explains an important cause: several new channel or electrolyte materials
++are unseen categories, and each paper omits 10-14 of the model's 25 raw inputs.
++The model also severely underpredicts the new long-retention devices. A defensible
++next step is to add these rows to a versioned dataset, retrain without placing the
++external test rows in the training fold, and evaluate with grouped-by-paper
++cross-validation plus a still-untouched later-paper test set.
++
++## Metrics
++
++Because retention spans orders of magnitude, `RMSE_log1p` and factor error are
++the primary metrics. Raw-millisecond MAE/RMSE are included but can be dominated
++by one long-retention device. Row-level columns include signed error, absolute
++error, APE, sMAPE, log error, and symmetric factor error.
++
++## P3HT paper-grouped retraining
++
++`p3ht_validation.py` is a separate, non-destructive experiment. It does not
++overwrite the deployed model. The workflow first keeps the 431 P3HT rows from
++62 historical paper identifiers. It then narrows training to rows matching the
++external material domain when each filter still leaves at least eight papers.
++For the current external paper, the retained domain contains 165 rows from 21
++papers and matches spin coating, EMIM, and a PVDF-HFP-containing electrolyte.
++
++Candidate selection uses five-fold `GroupKFold` by `Paper_ID`. A complete paper
++is therefore confined to either training or validation in each fold. The
++external target values are not accepted by the candidate-selection function.
++Post-fabrication electrical measurements and gate-pulse measurement protocol
++fields are excluded so the model uses material and fabrication information.
++
++The physics-on variant includes the directly calculated ion diffusivity and
++viscosity as well as log diffusivity, log viscosity, diffusivity-to-viscosity
++ratio, ionic mobility proxy, and a radius-to-diffusion-timescale proxy. The
++physics-off ablation removes this entire feature family while keeping identical
++paper folds.
++
++Run:
++
++```bash
++python -m unittest discover -s tests -v
++python p3ht_validation.py \
++  --historical-data 'data/통합 data ver.5.xlsx' \
++  --external-data external_validation_data.csv \
++  --out validation_results
++```
++
++The current external P3HT paper contributes three directly reported decay
++constants. The physics-on predictions are:
++
++- BF4: actual 275 ms, prediction 1601.1 ms, APE 482.20%
++- TFSI: actual 406 ms, prediction 1071.7 ms, APE 163.97%
++- MeSO4: actual 1059 ms, prediction 1155.1 ms, APE 9.07%
++
++The three-row MAPE is 218.42%. The 9.07% value is a real row-level result for
++the MeSO4 condition and must not be described as the overall external error.
++`validation_results/p3ht_external_predictions.csv` preserves all eligible rows
++so this distinction can be audited.
+diff --git a/docs/superpowers/plans/2026-08-25-p3ht-external-validation.md b/docs/superpowers/plans/2026-08-25-p3ht-external-validation.md
+new file mode 100644
+index 0000000..e7480f4
+--- /dev/null
++++ b/docs/superpowers/plans/2026-08-25-p3ht-external-validation.md
+@@ -0,0 +1,167 @@
++# P3HT External Validation Implementation Plan
++
++> **For Codex:** Execute this plan task by task. Use test-driven development and fresh verification before reporting results.
++
++**Goal:** Retrain the retention-time model with paper-level separation, quantify the contribution of physics-informed diffusivity features, and report honest external error for target-aligned post-May-2026 P3HT cases.
++
++**Architecture:** Add a standalone validation module that reuses the repository cleaning and model-building utilities without overwriting the deployed model. Candidate model choices are selected only by grouped cross-validation on the historical P3HT dataset. The chosen model is then evaluated on every eligible external P3HT row, while a nearest-domain subset is reported separately using a similarity rule that does not use retention time.
++
++**Tech Stack:** Python, pandas, NumPy, scikit-learn, joblib, unittest
++
++---
++
++## Task 1: Freeze eligibility and metric behavior in tests
++
++**Files:**
++- Create: `tests/test_p3ht_validation.py`
++- Create: `p3ht_validation.py`
++
++**Step 1: Write failing tests**
++
++Cover these behaviors:
++
++- external eligibility requires strict target alignment, P3HT channel, and publication date on or after 2026-06-01
++- similarity uses input conditions only and must not inspect `Tau_ms`
++- percentage error and paper-level summaries are calculated from actual predictions
++- physics-feature ablation removes the diffusivity-derived feature family while leaving other fields intact
++- grouped folds never put the same `Paper_ID` in both training and validation
++
++**Step 2: Run tests and confirm failure**
++
++Run: `python -m unittest tests.test_p3ht_validation -v`
++
++Expected: import or assertion failures because the implementation does not exist.
++
++**Step 3: Implement minimal functions**
++
++Implement only enough to pass the tests:
++
++- `filter_external_p3ht`
++- `select_similarity_inputs`
++- `calculate_similarity_score`
++- `summarize_external_predictions`
++- `drop_physics_derived_features`
++- `make_group_splits`
++
++**Step 4: Run focused and full tests**
++
++Run: `python -m unittest tests.test_p3ht_validation -v`
++
++Run: `python -m unittest discover -s tests -v`
++
++Expected: all tests pass.
++
++## Task 2: Implement grouped model selection and physics ablation
++
++**Files:**
++- Modify: `tests/test_p3ht_validation.py`
++- Modify: `p3ht_validation.py`
++
++**Step 1: Write failing tests**
++
++Test that:
++
++- training input is limited to valid historical P3HT rows
++- the bottom-one-percent target rule is fitted on training rows only
++- grouped cross-validation returns fold-level and aggregate metrics
++- a candidate is selected by grouped validation MAE in log space, never by external error
++- the physics-on and physics-off variants use identical folds
++
++**Step 2: Run tests and confirm failure**
++
++Run: `python -m unittest tests.test_p3ht_validation -v`
++
++Expected: failures for missing training and selection functions.
++
++**Step 3: Implement grouped training**
++
++Add:
++
++- historical workbook loader
++- P3HT cleaning and feature construction
++- `GroupKFold` evaluation by `Paper_ID`
++- compact ExtraTrees candidate grid
++- log-space MAE, RMSE, median factor error, and MAPE reporting
++- physics-on versus physics-off ablation
++
++The external paper targets must not be passed into candidate selection.
++
++**Step 4: Run focused and full tests**
++
++Run both unittest commands from Task 1 and confirm all pass.
++
++## Task 3: Build auditable P3HT external dataset and run evaluation
++
++**Files:**
++- Modify: `external_validation_data.csv`
++- Create: `validation_results/p3ht_grouped_cv.csv`
++- Create: `validation_results/p3ht_external_predictions.csv`
++- Create: `validation_results/p3ht_external_summary.json`
++- Create: `validation_results/p3ht_external_report.md`
++
++**Step 1: Confirm source fields**
++
++For every eligible external row, retain DOI, publication date, exact reported retention constant, material, ion, process fields, and source notes. Do not infer unavailable fabrication fields from retention time.
++
++**Step 2: Run the grouped validation command**
++
++Run:
++
++`python p3ht_validation.py --historical-data 'data/통합 data ver.5.xlsx' --external-data external_validation_data.csv --out validation_results`
++
++Expected outputs:
++
++- grouped cross-validation metrics for physics-on and physics-off variants
++- chosen candidate based only on historical grouped validation
++- predictions for all eligible external P3HT rows
++- a separately labelled nearest-domain subset based only on process and material similarity
++
++**Step 3: Inspect actual results**
++
++Check:
++
++- row count and paper count
++- no duplicated `validation_id`
++- no overlap of `Paper_ID` across grouped folds
++- all predicted and actual retention times are finite and positive
++- reported metrics can be recalculated from the prediction CSV
++
++## Task 4: Add reproducibility documentation
++
++**Files:**
++- Modify: `EXTERNAL_VALIDATION_README.md`
++
++Document:
++
++- historical source and P3HT restriction
++- paper-level grouping
++- physics-derived feature family and ablation
++- external inclusion rule
++- why the nearest-domain result is not the overall external result
++- exact reproduction command
++
++## Task 5: Final verification
++
++**Step 1: Run all tests**
++
++Run: `python -m unittest discover -s tests -v`
++
++Expected: all tests pass.
++
++**Step 2: Re-run the complete evaluation**
++
++Run the command from Task 3 from a clean output state.
++
++**Step 3: Recalculate headline metrics independently**
++
++Read `p3ht_external_predictions.csv` and independently recompute MAPE, median factor error, and the nearest-domain subset result.
++
++**Step 4: Review working tree**
++
++Run: `git status --short`
++
++Confirm only planned files changed. Do not push because the connected repository is read-only for writes.
++
++**Step 5: Ask before self-introduction wording**
++
++Present the verified actual metrics and the exact proposed sentence. Do not insert or delete wording from the user-approved self-introduction until the user approves it.
+diff --git a/external_validation.py b/external_validation.py
+new file mode 100644
+index 0000000..4a9918c
+--- /dev/null
++++ b/external_validation.py
+@@ -0,0 +1,330 @@
++"""Reproducible external validation for the retention-time model.
++
++The repository model predicts log1p(Tau_ms). This module converts the output
++back to milliseconds, calculates row-level errors, and reports metrics that are
++appropriate for a target spanning several orders of magnitude.
++"""
++from __future__ import annotations
++
++import argparse
++import json
++import math
++from pathlib import Path
++from typing import Any
++
++import joblib
++import numpy as np
++import pandas as pd
++
++from model_utils import RAW_INPUT_COLS, prepare_input_for_model
++
++
++REQUIRED_METADATA_COLS = ["validation_id", "Paper_ID", "Tau_ms", "inclusion_tier"]
++ALLOWED_TIERS = {"strict", "supplementary"}
++
++
++def _is_missing(value: Any) -> bool:
++    if value is None:
++        return True
++    try:
++        if bool(pd.isna(value)):
++            return True
++    except (TypeError, ValueError):
++        pass
++    return str(value).strip().casefold() in {"", "nan", "none", "null", "na", "n/a", "-"}
++
++
++def load_validation_data(path: str | Path) -> pd.DataFrame:
++    """Load and validate the hand-extracted external dataset."""
++    frame = pd.read_csv(path)
++    return validate_external_rows(frame)
++
++
++def validate_external_rows(frame: pd.DataFrame) -> pd.DataFrame:
++    """Fail early on invalid targets, duplicate IDs, or unsupported tiers."""
++    missing_cols = [col for col in REQUIRED_METADATA_COLS if col not in frame.columns]
++    if missing_cols:
++        raise ValueError(f"Missing required columns: {', '.join(missing_cols)}")
++
++    result = frame.copy()
++    result["Tau_ms"] = pd.to_numeric(result["Tau_ms"], errors="coerce")
++    if result["Tau_ms"].isna().any() or (result["Tau_ms"] <= 0).any():
++        raise ValueError("Every Tau_ms value must be finite and positive.")
++    if result["validation_id"].duplicated().any():
++        duplicated = result.loc[result["validation_id"].duplicated(), "validation_id"].tolist()
++        raise ValueError(f"Duplicate validation_id values: {duplicated}")
++    invalid_tiers = sorted(set(result["inclusion_tier"].dropna()) - ALLOWED_TIERS)
++    if invalid_tiers:
++        raise ValueError(f"Unsupported inclusion_tier values: {invalid_tiers}")
++
++    for col in RAW_INPUT_COLS:
++        if col not in result.columns:
++            result[col] = np.nan
++    return result
++
++
++def predict_with_bundle(frame: pd.DataFrame, bundle: dict[str, Any]) -> pd.DataFrame:
++    """Predict row-by-row to match the single-condition app semantics."""
++    pred_log = []
++    for _, row in frame[RAW_INPUT_COLS].iterrows():
++        prepared = prepare_input_for_model(pd.DataFrame([row.to_dict()]), bundle)
++        pred_log.append(float(bundle["model"].predict(prepared)[0]))
++    pred_log = np.asarray(pred_log, dtype=float)
++    pred_tau = np.expm1(pred_log)
++    if not np.isfinite(pred_tau).all() or (pred_tau <= 0).any():
++        raise ValueError("Model produced a non-finite or non-positive retention time.")
++
++    result = frame.copy()
++    result["pred_log1p_tau_ms"] = pred_log
++    result["pred_tau_ms"] = pred_tau
++    return result
++
++
++def audit_model_inputs(frame: pd.DataFrame, schema_path: str | Path) -> pd.DataFrame:
++    """Count missing, unseen categorical, and out-of-training-range inputs."""
++    schema = json.loads(Path(schema_path).read_text(encoding="utf-8"))
++    categorical_cols = schema.get("input_categorical_cols", [])
++    options = schema.get("categorical_options", {})
++    numeric_stats = schema.get("numeric_stats", {})
++    rows: list[dict[str, Any]] = []
++
++    for _, row in frame.iterrows():
++        missing_fields = [col for col in RAW_INPUT_COLS if col not in row or _is_missing(row[col])]
++        unseen_fields = []
++        for col in categorical_cols:
++            value = row.get(col, np.nan)
++            if not _is_missing(value) and str(value) not in set(map(str, options.get(col, []))):
++                unseen_fields.append(col)
++
++        out_of_range_fields = []
++        for col, stats in numeric_stats.items():
++            value = row.get(col, np.nan)
++            if _is_missing(value):
++                continue
++            try:
++                numeric = float(value)
++            except (TypeError, ValueError):
++                continue
++            minimum = stats.get("min")
++            maximum = stats.get("max")
++            if (minimum is not None and numeric < float(minimum)) or (
++                maximum is not None and numeric > float(maximum)
++            ):
++                out_of_range_fields.append(col)
++
++        rows.append(
++            {
++                "missing_raw_input_count": len(missing_fields),
++                "missing_raw_input_fields": ";".join(missing_fields),
++                "unseen_categorical_count": len(unseen_fields),
++                "unseen_categorical_fields": ";".join(unseen_fields),
++                "out_of_range_numeric_count": len(out_of_range_fields),
++                "out_of_range_numeric_fields": ";".join(out_of_range_fields),
++            }
++        )
++    return pd.DataFrame(rows, index=frame.index)
++
++
++def calculate_row_metrics(frame: pd.DataFrame) -> pd.DataFrame:
++    """Add signed, percentage, log-space, and multiplicative errors."""
++    result = frame.copy()
++    actual = pd.to_numeric(result["Tau_ms"], errors="raise").astype(float)
++    predicted = pd.to_numeric(result["pred_tau_ms"], errors="raise").astype(float)
++    if (actual <= 0).any() or (predicted <= 0).any():
++        raise ValueError("Actual and predicted retention times must be positive.")
++
++    difference = predicted - actual
++    absolute = difference.abs()
++    result["signed_error_ms"] = difference
++    result["absolute_error_ms"] = absolute
++    result["ape_percent"] = absolute / actual * 100.0
++    result["smape_percent"] = 200.0 * absolute / (actual.abs() + predicted.abs())
++    result["actual_log1p_tau_ms"] = np.log1p(actual)
++    if "pred_log1p_tau_ms" not in result.columns:
++        result["pred_log1p_tau_ms"] = np.log1p(predicted)
++    result["log_error"] = result["pred_log1p_tau_ms"] - result["actual_log1p_tau_ms"]
++    result["abs_log_error"] = result["log_error"].abs()
++    result["factor_error"] = np.maximum(predicted / actual, actual / predicted)
++    return result
++
++
++def _safe_float(value: float) -> float | None:
++    return float(value) if math.isfinite(float(value)) else None
++
++
++def _summarize_subset(frame: pd.DataFrame) -> dict[str, Any]:
++    actual = frame["Tau_ms"].to_numpy(dtype=float)
++    predicted = frame["pred_tau_ms"].to_numpy(dtype=float)
++    actual_log = np.log1p(actual)
++    predicted_log = np.log1p(predicted)
++    residual_log = predicted_log - actual_log
++    denominator = np.sum((actual_log - actual_log.mean()) ** 2)
++    r2_log = np.nan if len(frame) < 2 or denominator == 0 else 1.0 - np.sum(residual_log**2) / denominator
++    factor = frame["factor_error"].to_numpy(dtype=float)
++
++    return {
++        "n_rows": int(len(frame)),
++        "n_papers": int(frame["Paper_ID"].nunique()),
++        "mae_ms": float(np.mean(np.abs(predicted - actual))),
++        "rmse_ms": float(np.sqrt(np.mean((predicted - actual) ** 2))),
++        "mape_percent": float(frame["ape_percent"].mean()),
++        "smape_percent": float(frame["smape_percent"].mean()),
++        "mae_log1p": float(np.mean(np.abs(residual_log))),
++        "rmse_log1p": float(np.sqrt(np.mean(residual_log**2))),
++        "r2_log1p": _safe_float(r2_log),
++        "median_factor_error": float(np.median(factor)),
++        "geometric_mean_factor_error": float(np.exp(np.mean(np.log(factor)))),
++        "within_2x_percent": float(np.mean(factor <= 2.0) * 100.0),
++        "within_3x_percent": float(np.mean(factor <= 3.0) * 100.0),
++        "within_10x_percent": float(np.mean(factor <= 10.0) * 100.0),
++    }
++
++
++def summarize_predictions(frame: pd.DataFrame) -> dict[str, dict[str, Any]]:
++    """Report strict target-aligned results separately from supplementary rows."""
++    strict = frame.loc[frame["inclusion_tier"] == "strict"].copy()
++    if strict.empty:
++        raise ValueError("At least one strict validation row is required.")
++    return {
++        "strict": _summarize_subset(strict),
++        "all_eligible": _summarize_subset(frame),
++    }
++
++
++def extract_internal_performance(bundle: dict[str, Any]) -> dict[str, Any]:
++    """Read the holdout metrics using the key stored by this repository."""
++    return bundle.get("test_performance") or bundle.get("performance") or {}
++
++
++def _json_ready(value: Any) -> Any:
++    if isinstance(value, (np.integer,)):
++        return int(value)
++    if isinstance(value, (np.floating,)):
++        return _safe_float(float(value))
++    if isinstance(value, np.ndarray):
++        return value.tolist()
++    raise TypeError(f"Cannot serialize {type(value)!r}")
++
++
++def _dataframe_to_markdown(frame: pd.DataFrame) -> str:
++    """Render a compact GFM table without pandas' optional tabulate package."""
++    headers = [str(column).replace("|", "\\|") for column in frame.columns]
++    rows = []
++    for values in frame.itertuples(index=False, name=None):
++        rows.append(
++            [str(value).replace("|", "\\|").replace("\n", " ") for value in values]
++        )
++    lines = [
++        "| " + " | ".join(headers) + " |",
++        "| " + " | ".join(["---"] * len(headers)) + " |",
++    ]
++    lines.extend("| " + " | ".join(row) + " |" for row in rows)
++    return "\n".join(lines)
++
++
++def write_markdown_report(
++    predictions: pd.DataFrame,
++    summary: dict[str, Any],
++    output_path: str | Path,
++) -> None:
++    """Write a concise, auditable report alongside the machine-readable files."""
++    strict = summary["external_validation"]["strict"]
++    all_rows = summary["external_validation"]["all_eligible"]
++    columns = [
++        "validation_id",
++        "inclusion_tier",
++        "Tau_ms",
++        "pred_tau_ms",
++        "ape_percent",
++        "factor_error",
++        "missing_raw_input_count",
++        "unseen_categorical_count",
++    ]
++    table = predictions[columns].copy()
++    for col in ["Tau_ms", "pred_tau_ms", "ape_percent", "factor_error"]:
++        table[col] = table[col].map(lambda value: f"{value:.3f}")
++
++    lines = [
++        "# External retention-time validation",
++        "",
++        "Publication window: 2026-06-01 through 2026-08-25.",
++        "",
++        "Strict rows use directly reported PSC/EPSC decay constants. Supplementary rows use a related but non-identical PPF decay constant and are not included in the primary result.",
++        "",
++        "## Primary result (strict)",
++        "",
++        f"- Rows / papers: {strict['n_rows']} / {strict['n_papers']}",
++        f"- RMSE (log1p ms): {strict['rmse_log1p']:.4f}",
++        f"- Median factor error: {strict['median_factor_error']:.3f}x",
++        f"- Within 3x: {strict['within_3x_percent']:.1f}%",
++        f"- MAPE: {strict['mape_percent']:.1f}%",
++        "",
++        "## Sensitivity result (strict + supplementary)",
++        "",
++        f"- Rows / papers: {all_rows['n_rows']} / {all_rows['n_papers']}",
++        f"- RMSE (log1p ms): {all_rows['rmse_log1p']:.4f}",
++        f"- Median factor error: {all_rows['median_factor_error']:.3f}x",
++        "",
++        "## Row-level results",
++        "",
++        _dataframe_to_markdown(table),
++        "",
++        "## Interpretation guardrails",
++        "",
++        "- This is a small, preliminary external check, not proof of generalization across all ion-driven devices.",
++        "- Blank paper inputs are imputed by the trained pipeline; the audit columns make this visible.",
++        "- Unseen channel materials are out-of-domain categorical inputs and should be interpreted cautiously.",
++    ]
++    Path(output_path).write_text("\n".join(lines) + "\n", encoding="utf-8")
++
++
++def run_validation(
++    data_path: str | Path,
++    model_path: str | Path,
++    schema_path: str | Path,
++    output_dir: str | Path,
++) -> tuple[pd.DataFrame, dict[str, Any]]:
++    """Execute the full validation workflow and persist reproducible outputs."""
++    frame = load_validation_data(data_path)
++    bundle = joblib.load(model_path)
++    audit = audit_model_inputs(frame, schema_path)
++    predictions = predict_with_bundle(frame, bundle)
++    predictions = pd.concat([predictions, audit], axis=1)
++    predictions = calculate_row_metrics(predictions)
++
++    summary = {
++        "model_path": str(model_path),
++        "data_path": str(data_path),
++        "target": "Tau_ms with model output transformed by expm1",
++        "model_internal_holdout": extract_internal_performance(bundle),
++        "external_validation": summarize_predictions(predictions),
++    }
++
++    output = Path(output_dir)
++    output.mkdir(parents=True, exist_ok=True)
++    predictions.to_csv(output / "external_validation_predictions.csv", index=False)
++    (output / "external_validation_summary.json").write_text(
++        json.dumps(summary, ensure_ascii=False, indent=2, default=_json_ready) + "\n",
++        encoding="utf-8",
++    )
++    write_markdown_report(predictions, summary, output / "external_validation_report.md")
++    return predictions, summary
++
++
++def build_parser() -> argparse.ArgumentParser:
++    parser = argparse.ArgumentParser(description=__doc__)
++    parser.add_argument("--data", default="external_validation_data.csv")
++    parser.add_argument("--model", default="models/retention_model.joblib")
++    parser.add_argument("--schema", default="models/input_schema.json")
++    parser.add_argument("--output-dir", default="validation_results")
++    return parser
++
++
++def main() -> None:
++    args = build_parser().parse_args()
++    _, summary = run_validation(args.data, args.model, args.schema, args.output_dir)
++    print(json.dumps(summary["external_validation"], ensure_ascii=False, indent=2))
++
++
++if __name__ == "__main__":
++    main()
+diff --git a/external_validation_data.csv b/external_validation_data.csv
+new file mode 100644
+index 0000000..f6d0a5e
+--- /dev/null
++++ b/external_validation_data.csv
+@@ -0,0 +1,10 @@
++validation_id,Paper_ID,paper_title,doi,publication_date,source_url,inclusion_tier,target_alignment,tau_definition,tau_source,Tau_ms,extraction_notes,Channel,Solvent,Concentration_mg_ml,Process,Spin_RPM,Annealing_temp_C,Annealing_time_h,Ion_type,wt,polymer,Ion_diffusion,Ion_viscosity,Anion_radius,Cation_radius,Cation,Anion,Gate_voltage_V,Drain_voltage_V,Gate_pulse_width_ms,Pulse_number,Electrode_type,Vth_V,On_off_ratio,Vth_window_V,Operating_temp_C,input_provenance_notes
++wan2026_bf4,10.1002/smll.74398,Anion-Engineered Organic Electrochemical Transistors With Multi-Timescale Synaptic Dynamics for Task-Adaptive Spiking Neural Networks,10.1002/smll.74398,2026-07-03,https://onlinelibrary.wiley.com/doi/10.1002/smll.74398,strict,direct EPSC decay,Single-exponential EPSC decay after one gate pulse,main text and decay-fit figure,275,BF4 decay constant reported as 0.275 s; converted to 275 ms,P3HT,,,Spin-coating,1500,130,0.083333,ion gel,,PVDF-HFP,,,,,EMIM,BF4,-2,-1,2000,1,Cr/Au,,,,,Device fabrication and electrical conditions reported in the paper; unavailable fields remain blank
++wan2026_tfsi,10.1002/smll.74398,Anion-Engineered Organic Electrochemical Transistors With Multi-Timescale Synaptic Dynamics for Task-Adaptive Spiking Neural Networks,10.1002/smll.74398,2026-07-03,https://onlinelibrary.wiley.com/doi/10.1002/smll.74398,strict,direct EPSC decay,Single-exponential EPSC decay after one gate pulse,main text and decay-fit figure,406,TFSI decay constant reported as 0.406 s; converted to 406 ms,P3HT,,,Spin-coating,1500,130,0.083333,ion gel,,PVDF-HFP,,,,,EMIM,TFSI,-2,-1,2000,1,Cr/Au,,,,,Device fabrication and electrical conditions reported in the paper; unavailable fields remain blank
++wan2026_meso4,10.1002/smll.74398,Anion-Engineered Organic Electrochemical Transistors With Multi-Timescale Synaptic Dynamics for Task-Adaptive Spiking Neural Networks,10.1002/smll.74398,2026-07-03,https://onlinelibrary.wiley.com/doi/10.1002/smll.74398,strict,direct EPSC decay,Single-exponential EPSC decay after one gate pulse,main text and decay-fit figure,1059,MeSO4 decay constant reported as 1.059 s; converted to 1059 ms,P3HT,,,Spin-coating,1500,130,0.083333,ion gel,,PVDF-HFP,,,,,EMIM,MeSO4,-2,-1,2000,1,Cr/Au,,,,,Device fabrication and electrical conditions reported in the paper; unavailable fields remain blank
++kwon2026_cpe_k,10.1002/adma.74192,Charge-Encoded Sidechains Enable Deterministic Ion Ingress and Memory Retention in Organic Electrochemical Synaptic Transistors,10.1002/adma.74192,2026-07-20,https://advanced.onlinelibrary.wiley.com/doi/10.1002/adma.74192,strict,direct LTP PSC decay,Slow component tau2 from double-exponential LTP decay after 30 pulses,main text Figure 5h,12000,tau2 reported as 12 s; converted to 12000 ms,CPE-K,,,,,,,polymer electrolyte,,PEO,,,,,Li,ClO4,-1.75,0.5,40,30,,-0.234,3850,,,Pulse width is reported for the synaptic potentiation protocol; drain voltage is the reported device measurement bias
++kwon2026_cpe_br,10.1002/adma.74192,Charge-Encoded Sidechains Enable Deterministic Ion Ingress and Memory Retention in Organic Electrochemical Synaptic Transistors,10.1002/adma.74192,2026-07-20,https://advanced.onlinelibrary.wiley.com/doi/10.1002/adma.74192,strict,direct LTP PSC decay,Slow component tau2 from double-exponential LTP decay after 30 pulses,main text Figure 5h,321000,tau2 reported as 321 s; converted to 321000 ms,CPE-Br,,,,,,,polymer electrolyte,,PEO,,,,,Li,ClO4,-1.75,0.5,40,30,,-0.545,199000,,,Pulse width is reported for the synaptic potentiation protocol; drain voltage is the reported device measurement bias
++kwon2026_cpe_zw,10.1002/adma.74192,Charge-Encoded Sidechains Enable Deterministic Ion Ingress and Memory Retention in Organic Electrochemical Synaptic Transistors,10.1002/adma.74192,2026-07-20,https://advanced.onlinelibrary.wiley.com/doi/10.1002/adma.74192,strict,direct LTP PSC decay,Slow component tau2 from double-exponential LTP decay after 30 pulses,main text Figure 5h,11000,tau2 reported as 11 s; converted to 11000 ms,CPE-Zw,,,,,,,polymer electrolyte,,PEO,,,,,Li,ClO4,-1.75,0.5,40,30,,-0.541,29300,,,Pulse width is reported for the synaptic potentiation protocol; drain voltage is the reported device measurement bias
++han2026_na_tfsi,10.1002/adfm.77301,Bio-Derived Polyelectrolyte Additive-Induced Interfacial Ion-Diffusion Barriers for Nonvolatile Organic Artificial Synapses,10.1002/adfm.77301,2026-07-24,https://advanced.onlinelibrary.wiley.com/doi/10.1002/adfm.77301,strict,direct PSC decay,Slow component tau3 from tri-exponential normalized EPSC decay after 10 pulses,main text Equation 2 and Figure 2l,35500,tau3 reported as 35.5 s; converted to 35500 ms,Pg2T-T,chloroform,4,Spin-coating,1000,,,electrolyte,,,,,,,Na,TFSI,-2.2,-0.01,60,10,Au,-1.54,,0.99,,Retention protocol used 10 pulses at -2.2 V with 60 ms width; channel fabrication and device parameters are reported in the paper
++han2026_sa_na_tfsi,10.1002/adfm.77301,Bio-Derived Polyelectrolyte Additive-Induced Interfacial Ion-Diffusion Barriers for Nonvolatile Organic Artificial Synapses,10.1002/adfm.77301,2026-07-24,https://advanced.onlinelibrary.wiley.com/doi/10.1002/adfm.77301,strict,direct PSC decay,Slow component tau3 from tri-exponential normalized EPSC decay after 10 pulses,main text Equation 2 and Figure 2l,89800,tau3 reported as 89.8 s; converted to 89800 ms,Pg2T-T,chloroform,4,Spin-coating,1000,,,electrolyte,,sodium alginate,,,,,Na,TFSI,-2.2,-0.01,60,10,Au,-1.00,,1.75,,Sodium-alginate additive is represented in polymer; it is an unseen model category and is flagged by the audit
++kim2026_ab_lget,10.26599/NR.2026.94909008,Azobenzene-introduced organic electrochemical transistors with enhanced synaptic properties for neuromorphic computing,10.26599/NR.2026.94909008,2026-08-12,https://www.sciopen.com/article/10.26599/NR.2026.94909008,supplementary,PPF decay proxy not direct PSC retention,Slow component tau2 from double-exponential PPF-index decay,main text Equation 5,6624,tau2 reported as 6624 ms; retained only as sensitivity analysis,P3HT,chloroform,5,Spin-coating,,120,0.5,ion gel,0.888889,PVDF-HFP,,,,,Li,TFSI,-2.5,,,2,Au,,,,,Dry electrolyte polymer fraction calculated as 8/(8+1) from PVDF-HFP:LiTFSI ratio; PPF pulse width and drain bias were not stated and remain blank
+diff --git a/model_utils.py b/model_utils.py
+index e5abaa0..948c31b 100644
+--- a/model_utils.py
++++ b/model_utils.py
+@@ -394,6 +394,11 @@ def add_engineered_features(df: pd.DataFrame) -> pd.DataFrame:
+ 
+     df["diffusion_viscosity_ratio"] = ion_diff / (ion_visc + eps)
+     df["ion_mobility_proxy"] = ion_diff / (ion_visc + eps)
++    df["log1p_ion_diffusion"] = np.log1p(ion_diff.clip(lower=0))
++    df["log1p_ion_viscosity"] = np.log1p(ion_visc.clip(lower=0))
++    pulse_seconds = pulse_w.clip(lower=0) / 1000.0
++    df["diffusion_length_proxy"] = np.sqrt(ion_diff.clip(lower=0) * pulse_seconds)
++    df["radius_diffusion_time_proxy"] = df["radius_sum"].pow(2) / (ion_diff + eps)
+ 
+     df["annealing_thermal_budget"] = ann_temp * ann_time
+     df["log1p_annealing_time_h"] = np.log1p(ann_time.clip(lower=0))
+diff --git a/p3ht_validation.py b/p3ht_validation.py
+new file mode 100644
+index 0000000..36b335c
+--- /dev/null
++++ b/p3ht_validation.py
+@@ -0,0 +1,782 @@
++"""Paper-grouped P3HT validation for the retention-time model.
++
++The module deliberately separates model selection from external evaluation.
++Historical grouped cross-validation chooses the model; external retention
++targets are used only after that choice has been made.
++"""
++from __future__ import annotations
++
++import argparse
++import json
++import math
++from pathlib import Path
++from typing import Any, Iterable, Sequence
++
++import numpy as np
++import pandas as pd
++from sklearn.compose import TransformedTargetRegressor
++from sklearn.ensemble import ExtraTreesRegressor
++from sklearn.metrics import mean_absolute_error, mean_squared_error
++from sklearn.model_selection import GroupKFold
++from sklearn.preprocessing import QuantileTransformer
++
++from model_utils import (
++    TARGET_COL,
++    add_engineered_features,
++    build_model_pipeline_countfreq,
++    sanitize_dataframe,
++)
++
++
++EXTERNAL_START_DATE = pd.Timestamp("2026-06-01")
++
++SIMILARITY_CATEGORICAL_COLS = [
++    "Channel",
++    "Solvent",
++    "Process",
++    "Ion_type",
++    "polymer",
++    "Cation",
++    "Anion",
++    "Electrode_type",
++]
++
++SIMILARITY_NUMERIC_COLS = [
++    "Concentration_mg_ml",
++    "Spin_RPM",
++    "Annealing_temp_C",
++    "Annealing_time_h",
++    "wt",
++    "Ion_diffusion",
++    "Ion_viscosity",
++    "Anion_radius",
++    "Cation_radius",
++    "Operating_temp_C",
++]
++
++PHYSICS_DERIVED_FEATURES = {
++    "Ion_diffusion",
++    "Ion_viscosity",
++    "diffusion_viscosity_ratio",
++    "ion_mobility_proxy",
++    "log_ion_diffusion",
++    "log_ion_viscosity",
++    "log1p_ion_diffusion",
++    "log1p_ion_viscosity",
++    "diffusion_length_proxy",
++    "radius_diffusion_time_proxy",
++}
++
++POST_FABRICATION_FEATURES = {"Vth_V", "On_off_ratio", "Vth_window_V"}
++MEASUREMENT_PROTOCOL_FEATURES = {
++    "Gate_voltage_V",
++    "Drain_voltage_V",
++    "Gate_pulse_width_ms",
++    "Pulse_number",
++    "abs_Gate_voltage_V",
++    "abs_Drain_voltage_V",
++    "voltage_difference_V",
++    "voltage_ratio",
++    "gate_pulse_dose",
++    "total_gate_dose",
++    "log1p_total_gate_dose",
++    "concentration_gate_dose",
++    "log1p_concentration_gate_dose",
++    "gate_voltage_x_pulse_number",
++    "pulse_width_x_pulse_number",
++    "voltage_diff_x_pulse_number",
++    "diffusion_length_proxy",
++}
++PHYSICS_RAW_COLS = ["Ion_diffusion", "Ion_viscosity", "Anion_radius", "Cation_radius"]
++
++
++def filter_external_p3ht(frame: pd.DataFrame) -> pd.DataFrame:
++    """Return every target-aligned P3HT row in the fixed publication window."""
++    result = frame.copy()
++    dates = pd.to_datetime(result["publication_date"], errors="coerce")
++    channel = result["Channel"].fillna("").astype(str).str.strip().str.casefold()
++    tier = result["inclusion_tier"].fillna("").astype(str).str.strip().str.casefold()
++    alignment = result["target_alignment"].fillna("").astype(str).str.strip().str.casefold()
++    keep = (
++        dates.ge(EXTERNAL_START_DATE)
++        & channel.eq("p3ht")
++        & tier.eq("strict")
++        & alignment.str.startswith("direct")
++    )
++    return result.loc[keep].reset_index(drop=True)
++
++
++def select_similarity_inputs() -> list[str]:
++    """Return pre-fabrication and operating inputs used for domain similarity."""
++    return list(SIMILARITY_CATEGORICAL_COLS + SIMILARITY_NUMERIC_COLS)
++
++
++def _present(value: object) -> bool:
++    if value is None:
++        return False
++    try:
++        if bool(pd.isna(value)):
++            return False
++    except (TypeError, ValueError):
++        pass
++    return str(value).strip().casefold() not in {"", "nan", "none", "null", "na", "n/a", "-"}
++
++
++def calculate_similarity_score(query: pd.Series, historical: pd.DataFrame) -> pd.Series:
++    """Calculate a target-blind Gower-style similarity against historical rows.
++
++    Missing query inputs are skipped. Numeric distances are scaled by the
++    historical interquartile range, while categoricals receive exact-match
++    scores. The returned value is between zero and one.
++    """
++    score_sum = pd.Series(0.0, index=historical.index)
++    weight_sum = pd.Series(0.0, index=historical.index)
++
++    for col in SIMILARITY_CATEGORICAL_COLS:
++        if col not in historical.columns or col not in query or not _present(query[col]):
++            continue
++        values = historical[col]
++        available = values.map(_present)
++        normalized = values.astype(str).str.strip().str.casefold()
++        query_value = str(query[col]).strip().casefold()
++        score_sum.loc[available] += normalized.loc[available].eq(query_value).astype(float)
++        weight_sum.loc[available] += 1.0
++
++    for col in SIMILARITY_NUMERIC_COLS:
++        if col not in historical.columns or col not in query or not _present(query[col]):
++            continue
++        values = pd.to_numeric(historical[col], errors="coerce")
++        available = values.notna()
++        if not available.any():
++            continue
++        query_value = float(query[col])
++        q1, q3 = values.loc[available].quantile([0.25, 0.75])
++        scale = float(q3 - q1)
++        if not np.isfinite(scale) or scale <= 0:
++            scale = float(values.loc[available].max() - values.loc[available].min())
++        if not np.isfinite(scale) or scale <= 0:
++            scale = max(abs(query_value), 1.0)
++        distance = (values.loc[available] - query_value).abs() / scale
++        score_sum.loc[available] += 1.0 / (1.0 + distance)
++        weight_sum.loc[available] += 1.0
++
++    return score_sum.div(weight_sum.replace(0.0, np.nan)).fillna(0.0)
++
++
++def summarize_external_predictions(frame: pd.DataFrame) -> dict[str, float | int]:
++    """Summarize errors without suppressing or replacing any eligible row."""
++    actual = pd.to_numeric(frame["Tau_ms"], errors="raise").astype(float)
++    predicted = pd.to_numeric(frame["pred_tau_ms"], errors="raise").astype(float)
++    if (actual <= 0).any() or (predicted <= 0).any():
++        raise ValueError("Actual and predicted retention times must be positive.")
++    ape = (predicted - actual).abs() / actual * 100.0
++    factors = np.maximum(predicted / actual, actual / predicted)
++    log_error = np.log1p(predicted) - np.log1p(actual)
++    return {
++        "n_rows": int(len(frame)),
++        "n_papers": int(frame["Paper_ID"].nunique()),
++        "mape_percent": float(ape.mean()),
++        "median_ape_percent": float(ape.median()),
++        "median_factor_error": float(np.median(factors)),
++        "mae_log1p": float(np.mean(np.abs(log_error))),
++        "rmse_log1p": float(np.sqrt(np.mean(log_error**2))),
++    }
++
++
++def drop_physics_derived_features(frame: pd.DataFrame) -> pd.DataFrame:
++    """Remove the diffusivity and viscosity feature family for ablation."""
++    return frame.drop(columns=sorted(PHYSICS_DERIVED_FEATURES), errors="ignore")
++
++
++def make_group_splits(groups: Iterable[object], n_splits: int = 5) -> list[tuple[np.ndarray, np.ndarray]]:
++    """Create paper-disjoint folds and fail if too few papers are available."""
++    group_series = pd.Series(list(groups)).reset_index(drop=True)
++    unique_groups = int(group_series.nunique())
++    if unique_groups < 2:
++        raise ValueError("At least two unique Paper_ID values are required.")
++    actual_splits = min(int(n_splits), unique_groups)
++    splitter = GroupKFold(n_splits=actual_splits)
++    positions = np.arange(len(group_series))
++    return list(splitter.split(positions, groups=group_series))
++
++
++def prepare_historical_p3ht(frame: pd.DataFrame) -> pd.DataFrame:
++    """Clean the historical dataset and retain valid P3HT observations."""
++    result = sanitize_dataframe(frame, require_tau=True)
++    if "Paper_ID" not in result.columns:
++        raise ValueError("Historical data must contain Paper_ID.")
++    channel = result["Channel"].fillna("").astype(str).str.strip().str.casefold()
++    paper_present = result["Paper_ID"].map(_present)
++    return result.loc[channel.eq("p3ht") & paper_present].reset_index(drop=True)
++
++
++def fit_tau_floor(training_tau: pd.Series, quantile: float = 0.01) -> float:
++    """Fit the optional low-target trimming threshold on training targets only."""
++    values = pd.to_numeric(training_tau, errors="coerce").dropna()
++    values = values.loc[values > 0]
++    if values.empty:
++        raise ValueError("At least one positive training Tau_ms value is required.")
++    return float(values.quantile(float(quantile)))
++
++
++def _feature_frame(frame: pd.DataFrame, use_physics: bool) -> pd.DataFrame:
++    features = add_engineered_features(frame)
++    features = features.drop(
++        columns=[
++            TARGET_COL,
++            "Paper_ID",
++            "paper_year",
++            *sorted(POST_FABRICATION_FEATURES),
++            *sorted(MEASUREMENT_PROTOCOL_FEATURES),
++        ],
++        errors="ignore",
++    )
++    if not use_physics:
++        features = drop_physics_derived_features(features)
++    return features.replace([np.inf, -np.inf], np.nan)
++
++
++def _build_candidate_model(
++    X_train: pd.DataFrame,
++    candidate: dict[str, Any],
++    train_rows: int,
++):
++    categorical_cols = X_train.select_dtypes(include=["object", "category"]).columns.tolist()
++    numeric_cols = [column for column in X_train.columns if column not in categorical_cols]
++    numeric_model_cols = list(numeric_cols)
++    for column in categorical_cols:
++        numeric_model_cols.extend([f"{column}_te", f"{column}_count", f"{column}_freq"])
++    regressor = ExtraTreesRegressor(
++        n_estimators=int(candidate.get("n_estimators", 300)),
++        max_features=candidate.get("max_features", 0.65),
++        min_samples_leaf=int(candidate.get("min_samples_leaf", 1)),
++        min_samples_split=int(candidate.get("min_samples_split", 2)),
++        bootstrap=bool(candidate.get("bootstrap", False)),
++        random_state=int(candidate.get("random_state", 100)),
++        n_jobs=-1,
++    )
++    pipeline = build_model_pipeline_countfreq(
++        categorical_cols,
++        numeric_model_cols,
++        model=regressor,
++        smoothing=int(candidate.get("smoothing", 5)),
++    )
++    if candidate.get("target_transform", "none") == "quantile":
++        return TransformedTargetRegressor(
++            regressor=pipeline,
++            transformer=QuantileTransformer(
++                n_quantiles=min(100, int(train_rows)),
++                output_distribution="normal",
++                random_state=100,
++            ),
++        )
++    return pipeline
++
++
++def _factor_metrics(actual_log: np.ndarray, predicted_log: np.ndarray) -> tuple[float, float]:
++    actual = np.expm1(actual_log)
++    predicted = np.maximum(np.expm1(predicted_log), 1e-12)
++    factor = np.maximum(predicted / actual, actual / predicted)
++    ape = np.abs(predicted - actual) / actual * 100.0
++    return float(np.median(factor)), float(np.mean(ape))
++
++
++def evaluate_candidates_grouped(
++    historical: pd.DataFrame,
++    candidates: Sequence[dict[str, Any]],
++    n_splits: int = 5,
++) -> pd.DataFrame:
++    """Evaluate model candidates with identical paper-disjoint folds.
++
++    The returned table contains fold-level rows for both the physics-on and
++    physics-off variants. No external targets are accepted by this function.
++    """
++    frame = prepare_historical_p3ht(historical)
++    splits = make_group_splits(frame["Paper_ID"], n_splits=n_splits)
++    rows: list[dict[str, Any]] = []
++
++    for candidate in candidates:
++        candidate_name = str(candidate["candidate"])
++        for use_physics, variant_name in [(True, "physics_on"), (False, "physics_off")]:
++            for fold_number, (train_idx, valid_idx) in enumerate(splits, start=1):
++                train_frame = frame.iloc[train_idx].copy()
++                valid_frame = frame.iloc[valid_idx].copy()
++                tau_floor = fit_tau_floor(train_frame[TARGET_COL])
++                train_frame = train_frame.loc[train_frame[TARGET_COL] >= tau_floor].copy()
++
++                X_train = _feature_frame(train_frame, use_physics=use_physics)
++                X_valid = _feature_frame(valid_frame, use_physics=use_physics)
++                X_valid = X_valid.reindex(columns=X_train.columns)
++                y_train = np.log1p(train_frame[TARGET_COL].to_numpy(dtype=float))
++                y_valid = np.log1p(valid_frame[TARGET_COL].to_numpy(dtype=float))
++
++                model = _build_candidate_model(X_train, candidate, len(X_train))
++                model.fit(X_train, y_train)
++                predicted_log = np.asarray(model.predict(X_valid), dtype=float)
++                median_factor, mape = _factor_metrics(y_valid, predicted_log)
++                rows.append(
++                    {
++                        "candidate": candidate_name,
++                        "physics_variant": variant_name,
++                        "fold": fold_number,
++                        "train_rows": int(len(train_frame)),
++                        "valid_rows": int(len(valid_frame)),
++                        "train_papers": int(train_frame["Paper_ID"].nunique()),
++                        "valid_papers": int(valid_frame["Paper_ID"].nunique()),
++                        "tau_floor_ms": tau_floor,
++                        "mae_log1p": float(mean_absolute_error(y_valid, predicted_log)),
++                        "rmse_log1p": float(np.sqrt(mean_squared_error(y_valid, predicted_log))),
++                        "median_factor_error": median_factor,
++                        "mape_percent": mape,
++                    }
++                )
++    return pd.DataFrame(rows)
++
++
++def select_best_candidate(
++    cv_results: pd.DataFrame,
++    external_results: pd.DataFrame | None = None,
++) -> dict[str, Any]:
++    """Select by grouped historical MAE only; external results are ignored."""
++    del external_results
++    required = {"candidate", "physics_variant", "mae_log1p"}
++    missing = required - set(cv_results.columns)
++    if missing:
++        raise ValueError(f"Missing grouped CV columns: {sorted(missing)}")
++    summary = (
++        cv_results.groupby(["candidate", "physics_variant"], as_index=False)
++        .agg(
++            mean_mae_log1p=("mae_log1p", "mean"),
++            std_mae_log1p=("mae_log1p", "std"),
++            mean_mape_percent=("mape_percent", "mean") if "mape_percent" in cv_results.columns else ("mae_log1p", "mean"),
++        )
++        .sort_values(["mean_mae_log1p", "candidate", "physics_variant"], kind="stable")
++        .reset_index(drop=True)
++    )
++    return summary.iloc[0].to_dict()
++
++
++def fill_external_physics_from_historical(
++    external: pd.DataFrame,
++    historical: pd.DataFrame,
++) -> pd.DataFrame:
++    """Fill missing ion properties from target-blind historical ion medians.
++
++    The most specific available lookup is used in this order: cation and
++    anion, anion, cation, then the historical global median. Existing external
++    values are never overwritten.
++    """
++    result = external.copy()
++    source = historical.copy()
++    for column in PHYSICS_RAW_COLS:
++        if column not in result.columns:
++            result[column] = np.nan
++        if column not in source.columns:
++            source[column] = np.nan
++        source[column] = pd.to_numeric(source[column], errors="coerce")
++
++    levels: list[str] = []
++    for row_index, row in result.iterrows():
++        row_levels: list[str] = []
++        cation = str(row.get("Cation", "")).strip().casefold()
++        anion = str(row.get("Anion", "")).strip().casefold()
++        source_cation = source.get("Cation", pd.Series(index=source.index, dtype=object)).fillna("").astype(str).str.strip().str.casefold()
++        source_anion = source.get("Anion", pd.Series(index=source.index, dtype=object)).fillna("").astype(str).str.strip().str.casefold()
++
++        masks = []
++        if cation and anion:
++            masks.append(("cation+anion", source_cation.eq(cation) & source_anion.eq(anion)))
++        if anion:
++            masks.append(("anion", source_anion.eq(anion)))
++        if cation:
++            masks.append(("cation", source_cation.eq(cation)))
++        masks.append(("global", pd.Series(True, index=source.index)))
++
++        for column in PHYSICS_RAW_COLS:
++            if _present(result.at[row_index, column]):
++                continue
++            for level, mask in masks:
++                values = source.loc[mask, column].dropna()
++                if not values.empty:
++                    result.at[row_index, column] = float(values.median())
++                    row_levels.append(level)
++                    break
++        levels.append(row_levels[0] if row_levels and len(set(row_levels)) == 1 else ";".join(sorted(set(row_levels))))
++    result["physics_imputation_level"] = levels
++    return result
++
++
++def select_nearest_domain_subset(
++    frame: pd.DataFrame,
++    fraction: float = 1 / 3,
++) -> pd.DataFrame:
++    """Select the highest input-similarity fraction without using errors."""
++    if not 0 < float(fraction) <= 1:
++        raise ValueError("fraction must be in the interval (0, 1].")
++    if "input_similarity_score" not in frame.columns:
++        raise ValueError("input_similarity_score is required.")
++    count = max(1, int(math.ceil(len(frame) * float(fraction))))
++    return (
++        frame.sort_values(
++            ["input_similarity_score", "validation_id"],
++            ascending=[False, True],
++            kind="stable",
++        )
++        .head(count)
++        .reset_index(drop=True)
++    )
++
++
++def fit_final_model(
++    historical: pd.DataFrame,
++    candidate: dict[str, Any],
++    use_physics: bool,
++) -> dict[str, Any]:
++    """Fit one selected candidate on every eligible historical P3HT row."""
++    frame = prepare_historical_p3ht(historical)
++    tau_floor = fit_tau_floor(frame[TARGET_COL])
++    frame = frame.loc[frame[TARGET_COL] >= tau_floor].copy()
++    X_train = _feature_frame(frame, use_physics=use_physics)
++    y_train = np.log1p(frame[TARGET_COL].to_numpy(dtype=float))
++    model = _build_candidate_model(X_train, candidate, len(X_train))
++    model.fit(X_train, y_train)
++    return {
++        "model": model,
++        "feature_columns": X_train.columns.tolist(),
++        "use_physics": bool(use_physics),
++        "tau_floor_ms": tau_floor,
++        "training_rows": int(len(frame)),
++        "training_papers": int(frame["Paper_ID"].nunique()),
++        "candidate": dict(candidate),
++    }
++
++
++def predict_with_trained_model(bundle: dict[str, Any], external: pd.DataFrame) -> np.ndarray:
++    """Predict positive retention times from a fitted validation bundle."""
++    frame = sanitize_dataframe(external, require_tau=False)
++    X_external = _feature_frame(frame, use_physics=bool(bundle["use_physics"]))
++    X_external = X_external.reindex(columns=bundle["feature_columns"])
++    predicted_log = np.asarray(bundle["model"].predict(X_external), dtype=float)
++    predicted_tau = np.expm1(predicted_log)
++    if not np.isfinite(predicted_tau).all() or (predicted_tau <= 0).any():
++        raise ValueError("Model produced a non-finite or non-positive retention time.")
++    return predicted_tau
++
++
++def add_input_similarity_scores(
++    external: pd.DataFrame,
++    historical: pd.DataFrame,
++    neighbors: int = 5,
++) -> pd.DataFrame:
++    """Add target-blind mean top-neighbor input similarity to each external row."""
++    if int(neighbors) < 1:
++        raise ValueError("neighbors must be at least one.")
++    result = external.copy()
++    scores: list[float] = []
++    for _, query in result.iterrows():
++        row_scores = calculate_similarity_score(query, historical)
++        top = row_scores.nlargest(min(int(neighbors), len(row_scores)))
++        scores.append(float(top.mean()) if len(top) else 0.0)
++    result["input_similarity_score"] = scores
++    return result
++
++
++def restrict_historical_to_external_domain(
++    historical: pd.DataFrame,
++    external: pd.DataFrame,
++    min_papers: int = 5,
++) -> pd.DataFrame:
++    """Narrow historical rows by external inputs while preserving paper count.
++
++    Filters are applied sequentially only when the remaining set still has at
++    least ``min_papers`` unique papers. Retention targets are never inspected.
++    """
++    result = prepare_historical_p3ht(historical)
++    applied: list[str] = []
++
++    def maybe_apply(mask: pd.Series, description: str) -> None:
++        nonlocal result
++        candidate = result.loc[mask.fillna(False)].copy()
++        if candidate["Paper_ID"].nunique() >= int(min_papers):
++            result = candidate
++            applied.append(description)
++
++    for column in ["Process", "Cation"]:
++        if column not in external.columns or column not in result.columns:
++            continue
++        values = external[column].dropna().astype(str).str.strip().str.casefold().unique()
++        if len(values) == 1 and values[0]:
++            normalized = result[column].fillna("").astype(str).str.strip().str.casefold()
++            maybe_apply(normalized.eq(values[0]), f"{column}={values[0]}")
++
++    if "polymer" in external.columns and "polymer" in result.columns:
++        polymers = external["polymer"].dropna().astype(str).str.strip().str.casefold().unique()
++        if len(polymers) == 1 and polymers[0]:
++            polymer_key = polymers[0]
++            normalized = result["polymer"].fillna("").astype(str).str.strip().str.casefold()
++            maybe_apply(normalized.str.contains(polymer_key, regex=False), f"polymer contains {polymer_key}")
++
++    result = result.reset_index(drop=True)
++    result.attrs["domain_filters"] = applied
++    return result
++
++
++def default_candidates() -> list[dict[str, Any]]:
++    """Return a compact candidate grid fixed before external evaluation."""
++    return [
++        {
++            "candidate": "et_leaf1_mf035_s3",
++            "n_estimators": 250,
++            "max_features": 0.35,
++            "min_samples_leaf": 1,
++            "smoothing": 3,
++            "target_transform": "none",
++        },
++        {
++            "candidate": "et_leaf1_mf065_s5",
++            "n_estimators": 250,
++            "max_features": 0.65,
++            "min_samples_leaf": 1,
++            "smoothing": 5,
++            "target_transform": "none",
++        },
++        {
++            "candidate": "et_leaf1_mf100_s10",
++            "n_estimators": 250,
++            "max_features": 1.0,
++            "min_samples_leaf": 1,
++            "smoothing": 10,
++            "target_transform": "none",
++        },
++        {
++            "candidate": "et_leaf2_mf050_s3",
++            "n_estimators": 250,
++            "max_features": 0.5,
++            "min_samples_leaf": 2,
++            "smoothing": 3,
++            "target_transform": "none",
++        },
++        {
++            "candidate": "et_leaf2_mf080_s5",
++            "n_estimators": 250,
++            "max_features": 0.8,
++            "min_samples_leaf": 2,
++            "smoothing": 5,
++            "target_transform": "none",
++        },
++        {
++            "candidate": "et_leaf4_mf065_s10",
++            "n_estimators": 250,
++            "max_features": 0.65,
++            "min_samples_leaf": 4,
++            "smoothing": 10,
++            "target_transform": "none",
++        },
++        {
++            "candidate": "et_leaf1_mf065_quantile",
++            "n_estimators": 250,
++            "max_features": 0.65,
++            "min_samples_leaf": 1,
++            "smoothing": 5,
++            "target_transform": "quantile",
++        },
++        {
++            "candidate": "et_leaf2_mf065_quantile",
++            "n_estimators": 250,
++            "max_features": 0.65,
++            "min_samples_leaf": 2,
++            "smoothing": 5,
++            "target_transform": "quantile",
++        },
++    ]
++
++
++def _load_table(path: str | Path) -> pd.DataFrame:
++    path = Path(path)
++    if path.suffix.lower() in {".xlsx", ".xls"}:
++        return pd.read_excel(path)
++    if path.suffix.lower() == ".csv":
++        return pd.read_csv(path)
++    raise ValueError(f"Unsupported data file: {path}")
++
++
++def _json_default(value: Any) -> Any:
++    if isinstance(value, (np.integer,)):
++        return int(value)
++    if isinstance(value, (np.floating,)):
++        return float(value)
++    if isinstance(value, pd.Timestamp):
++        return value.isoformat()
++    raise TypeError(f"Cannot serialize {type(value)!r}")
++
++
++def _add_prediction_metrics(frame: pd.DataFrame, prediction_col: str, prefix: str) -> pd.DataFrame:
++    result = frame.copy()
++    actual = pd.to_numeric(result[TARGET_COL], errors="raise").astype(float)
++    predicted = pd.to_numeric(result[prediction_col], errors="raise").astype(float)
++    absolute = (predicted - actual).abs()
++    result[f"{prefix}_ape_percent"] = absolute / actual * 100.0
++    result[f"{prefix}_factor_error"] = np.maximum(predicted / actual, actual / predicted)
++    return result
++
++
++def _write_report(summary: dict[str, Any], predictions: pd.DataFrame, path: Path) -> None:
++    overall = summary["external_physics_on_all"]
++    nearest = summary["external_physics_on_nearest_third"]
++    ablation = summary["physics_ablation_grouped_cv"]
++    table_cols = [
++        "validation_id",
++        "Anion",
++        "Tau_ms",
++        "pred_tau_ms",
++        "ape_percent",
++        "pred_tau_ms_physics_off",
++        "physics_off_ape_percent",
++        "input_similarity_score",
++        "physics_imputation_level",
++    ]
++    table = predictions[table_cols].copy()
++    for column in [
++        "Tau_ms",
++        "pred_tau_ms",
++        "ape_percent",
++        "pred_tau_ms_physics_off",
++        "physics_off_ape_percent",
++        "input_similarity_score",
++    ]:
++        table[column] = table[column].map(lambda value: f"{float(value):.4f}")
++    headers = "| " + " | ".join(table.columns) + " |"
++    separator = "| " + " | ".join(["---"] * len(table.columns)) + " |"
++    body = [
++        "| " + " | ".join(map(str, row)) + " |"
++        for row in table.itertuples(index=False, name=None)
++    ]
++    lines = [
++        "# P3HT paper-grouped external validation",
++        "",
++        "The model candidate was selected only by paper-grouped cross-validation on historical P3HT data. External targets were used after model selection.",
++        "",
++        "## Historical grouped validation",
++        "",
++        f"Physics-on best candidate: {summary['selected_physics_on']['candidate']}",
++        f"Physics-off best candidate: {summary['selected_physics_off']['candidate']}",
++        f"Physics-on mean MAE in log1p space: {ablation['physics_on_mean_mae_log1p']:.4f}",
++        f"Physics-off mean MAE in log1p space: {ablation['physics_off_mean_mae_log1p']:.4f}",
++        "",
++        "## External P3HT result",
++        "",
++        f"All eligible rows: {overall['n_rows']} from {overall['n_papers']} paper",
++        f"All-row MAPE: {overall['mape_percent']:.2f}%",
++        f"All-row median factor error: {overall['median_factor_error']:.3f}x",
++        f"Highest input-similarity third MAPE: {nearest['mape_percent']:.2f}%",
++        f"Highest input-similarity third rows: {', '.join(summary['nearest_validation_ids'])}",
++        "",
++        "The highest-similarity subset is selected from materials and process inputs only. It is a scope-limited case result, not the overall external error.",
++        "",
++        "## Row results",
++        "",
++        headers,
++        separator,
++        *body,
++        "",
++    ]
++    path.write_text("\n".join(lines), encoding="utf-8")
++
++
++def run_validation(
++    historical_data: str | Path,
++    external_data: str | Path,
++    output_dir: str | Path,
++) -> dict[str, Any]:
++    """Run grouped model selection, physics ablation, and external evaluation."""
++    output_dir = Path(output_dir)
++    output_dir.mkdir(parents=True, exist_ok=True)
++    historical_raw = _load_table(historical_data)
++    historical = prepare_historical_p3ht(historical_raw)
++    external_raw = _load_table(external_data)
++    external = filter_external_p3ht(external_raw)
++    if external.empty:
++        raise ValueError("No eligible post-May-2026 strict P3HT external rows were found.")
++    if external["validation_id"].duplicated().any():
++        raise ValueError("External validation_id values must be unique.")
++    if pd.to_numeric(external[TARGET_COL], errors="coerce").isna().any() or (pd.to_numeric(external[TARGET_COL], errors="coerce") <= 0).any():
++        raise ValueError("Every eligible external Tau_ms value must be positive.")
++
++    historical_domain = restrict_historical_to_external_domain(
++        historical,
++        external,
++        min_papers=8,
++    )
++    domain_filters = list(historical_domain.attrs.get("domain_filters", []))
++
++    candidates = default_candidates()
++    cv_results = evaluate_candidates_grouped(historical_domain, candidates, n_splits=5)
++    cv_results.to_csv(output_dir / "p3ht_grouped_cv.csv", index=False)
++
++    selected_by_variant: dict[str, dict[str, Any]] = {}
++    candidate_map = {candidate["candidate"]: candidate for candidate in candidates}
++    predictions = add_input_similarity_scores(external, historical, neighbors=5)
++    predictions = fill_external_physics_from_historical(predictions, historical)
++
++    for variant, use_physics in [("physics_on", True), ("physics_off", False)]:
++        variant_cv = cv_results.loc[cv_results["physics_variant"] == variant]
++        selection = select_best_candidate(variant_cv)
++        selected_by_variant[variant] = selection
++        candidate = dict(candidate_map[str(selection["candidate"])])
++        candidate["n_estimators"] = 1000
++        bundle = fit_final_model(historical_domain, candidate, use_physics=use_physics)
++        prediction_col = "pred_tau_ms" if use_physics else "pred_tau_ms_physics_off"
++        predictions[prediction_col] = predict_with_trained_model(bundle, predictions)
++
++    predictions = _add_prediction_metrics(predictions, "pred_tau_ms", "physics_on")
++    predictions = _add_prediction_metrics(predictions, "pred_tau_ms_physics_off", "physics_off")
++    predictions["ape_percent"] = predictions["physics_on_ape_percent"]
++    predictions["factor_error"] = predictions["physics_on_factor_error"]
++    predictions.to_csv(output_dir / "p3ht_external_predictions.csv", index=False)
++
++    nearest = select_nearest_domain_subset(predictions, fraction=1 / 3)
++    overall_summary = summarize_external_predictions(predictions)
++    nearest_summary = summarize_external_predictions(nearest)
++    physics_off_summary = summarize_external_predictions(
++        predictions.rename(columns={"pred_tau_ms": "pred_tau_ms_physics_on_original", "pred_tau_ms_physics_off": "pred_tau_ms"})
++    )
++    summary = {
++        "historical_p3ht_rows": int(len(historical)),
++        "historical_p3ht_papers": int(historical["Paper_ID"].nunique()),
++        "domain_training_rows": int(len(historical_domain)),
++        "domain_training_papers": int(historical_domain["Paper_ID"].nunique()),
++        "domain_filters": domain_filters,
++        "external_publication_start": str(EXTERNAL_START_DATE.date()),
++        "selected_physics_on": selected_by_variant["physics_on"],
++        "selected_physics_off": selected_by_variant["physics_off"],
++        "physics_ablation_grouped_cv": {
++            "physics_on_mean_mae_log1p": float(selected_by_variant["physics_on"]["mean_mae_log1p"]),
++            "physics_off_mean_mae_log1p": float(selected_by_variant["physics_off"]["mean_mae_log1p"]),
++        },
++        "external_physics_on_all": overall_summary,
++        "external_physics_on_nearest_third": nearest_summary,
++        "external_physics_off_all": physics_off_summary,
++        "nearest_validation_ids": nearest["validation_id"].astype(str).tolist(),
++        "selection_rule": "candidate chosen by mean paper-grouped historical MAE_log1p; external targets excluded",
++        "nearest_subset_rule": "top one-third by mean five-neighbor input similarity; Tau_ms and prediction errors excluded",
++    }
++    (output_dir / "p3ht_external_summary.json").write_text(
++        json.dumps(summary, ensure_ascii=False, indent=2, default=_json_default),
++        encoding="utf-8",
++    )
++    _write_report(summary, predictions, output_dir / "p3ht_external_report.md")
++    return summary
++
++
++def main() -> None:
++    parser = argparse.ArgumentParser(description=__doc__)
++    parser.add_argument("--historical-data", required=True)
++    parser.add_argument("--external-data", required=True)
++    parser.add_argument("--out", default="validation_results")
++    args = parser.parse_args()
++    summary = run_validation(args.historical_data, args.external_data, args.out)
++    print(json.dumps(summary, ensure_ascii=False, indent=2, default=_json_default))
++
++
++if __name__ == "__main__":
++    main()
+diff --git a/paper_screening_log.csv b/paper_screening_log.csv
+new file mode 100644
+index 0000000..bedbfae
+--- /dev/null
++++ b/paper_screening_log.csv
+@@ -0,0 +1,18 @@
++paper_title,doi,publication_date,source_url,device_scope,screening_status,reason
++Anion-Engineered Organic Electrochemical Transistors With Multi-Timescale Synaptic Dynamics for Task-Adaptive Spiking Neural Networks,10.1002/smll.74398,2026-07-03,https://onlinelibrary.wiley.com/doi/10.1002/smll.74398,ion-gel OECT,included_strict,Three directly reported single-exponential EPSC decay constants
++Charge-Encoded Sidechains Enable Deterministic Ion Ingress and Memory Retention in Organic Electrochemical Synaptic Transistors,10.1002/adma.74192,2026-07-20,https://advanced.onlinelibrary.wiley.com/doi/10.1002/adma.74192,polymer-electrolyte OEST,included_strict,Three directly reported slow LTP decay constants tau2
++Bio-Derived Polyelectrolyte Additive-Induced Interfacial Ion-Diffusion Barriers for Nonvolatile Organic Artificial Synapses,10.1002/adfm.77301,2026-07-24,https://advanced.onlinelibrary.wiley.com/doi/10.1002/adfm.77301,electrolyte-gated OEST,included_strict,Two directly reported slow PSC decay constants tau3
++Azobenzene-introduced organic electrochemical transistors with enhanced synaptic properties for neuromorphic computing,10.26599/NR.2026.94909008,2026-08-12,https://www.sciopen.com/article/10.26599/NR.2026.94909008,Li-ion-gel OECT,included_supplementary,Reported tau2 is a PPF-index decay proxy rather than direct PSC retention
++Molecular Backbone Regulation for Enhanced Ion Retention in Nonvolatile Organic Electrochemical Synaptic Transistors,10.1002/smll.75053,2026-08-05,https://onlinelibrary.wiley.com/doi/10.1002/smll.75053,ionic-liquid OEST,not_validation_ready,Exact tri-exponential tau values are figure-only in accessible material; no unverified digitization used
++Ultralow-Energy Ti3C2Tx Ion-Gated Synaptic Transistors for Homogeneous Physical Reservoir Computing,10.1002/adfm.75734,2026-06-06,https://advanced.onlinelibrary.wiley.com/doi/10.1002/adfm.75734,ion-gated MXene transistor,not_validation_ready,No directly reported target-aligned retention tau was found in accessible text
++All-two-dimensional ion-gating synaptic transistors for high-temperature and ultralow-energy-consumption neuromorphic applications,10.1126/sciadv.aec7731,2026-07-10,https://www.science.org/doi/10.1126/sciadv.aec7731,solid-ion-gating 2D transistor,excluded_target_mismatch,Reports retention exceeding 10000 s rather than a fitted decay constant tau
++Linking device dynamics to neural network performance in ionically gated synaptic transistors,10.1038/s41598-026-59993-8,2026-07-01,https://www.nature.com/articles/s41598-026-59993-8,ionically gated MoS2 transistor,excluded_no_tau,No directly reported target-aligned retention tau was identified
++Correspondence of Plasticity and Hysteresis in Organic Electrochemical Transistor Synapses,10.1021/acsaelm.6c00658,2026-06-30,https://pubs.acs.org/doi/10.1021/acsaelm.6c00658,OECT theory and experiment,excluded_no_tau,Mechanistic correspondence study without a validation-ready experimental retention target
++Tactile Neuromorphic Ion-Gated Vertical Transistor Displays Enabling Dual-Output Reservoir Computing,10.1021/acsnano.6c05264,2026-06-30,https://pubs.acs.org/doi/10.1021/acsnano.6c05264,ion-gated vertical transistor,excluded_no_tau,Pressure-dependent relaxation is reported but an exact target-aligned tau was not found
++Flexible electrolyte-gated oxide transistors for synaptic memory and neuromorphic computing,10.1063/5.0325815,2026-07-23,https://pubs.aip.org/aip/apl/article/129/3/033304/3399146/Flexible-electrolyte-gated-oxide-transistors-for,electrolyte-gated oxide transistor,excluded_no_tau,Uses forgetting and phenomenological weighting without a validation-ready reported tau
++End-to-End Neuron-inspired Signal Transduction Using Organic Electrochemical Transistors,,2026-07-16,https://link.springer.com/search?query=End-to-End+Neuron-inspired+Signal+Transduction+Using+Organic+Electrochemical+Transistors,OECT system,excluded_no_tau,System-level signal pathway paper; no target-aligned reported retention tau identified
++Coupled dual-channel memristors for hardware-native trustworthy Bayesian intelligence,10.1038/s41467-026-74898-w,2026-06-26,https://www.nature.com/articles/s41467-026-74898-w,ion-gel ZnO memristor,excluded_device_scope,Memristor architecture is outside the trained transistor input schema
++Rate Programmable Ionic-Redox Switching with Tunable Volatility in CuCrP2S6,10.48550/arXiv.2606.25679,2026-06-24,https://arxiv.org/abs/2606.25679,two-terminal ionic-redox device,excluded_device_scope,Preprint and two-terminal device are outside the trained transistor input schema
++Performance Enhancement of Tin Chloride-Incorporated Ferroelectric Polymer-Based Artificial Synapse for Hardware Neural Networks,10.1002/adfm.77012,2026-07,https://advanced.onlinelibrary.wiley.com/doi/10.1002/adfm.77012,ferroelectric polymer synapse,excluded_mechanism_scope,Dominant ferroelectric phase-transition mechanism does not match the defined ion-retention target
++Hydrogen-Bond-Driven Ion Retention in Electrolyte-Gated Synaptic Transistors,10.1002/adfm.75576,2026-04-24,https://advanced.onlinelibrary.wiley.com/doi/10.1002/adfm.75576,electrolyte-gated synaptic transistor,excluded_date,Published before the 2026-06-01 lower bound
++Overcoming Volatility in Ion Gel via Ag Doping for Nonvolatile Memristive Switching,10.1021/acsomega.5c08106,2026-02-03,https://pubs.acs.org/doi/10.1021/acsomega.5c08106,ion-gel memristor,excluded_date,Published before the 2026-06-01 lower bound and outside transistor scope
+diff --git a/tests/test_external_validation.py b/tests/test_external_validation.py
+new file mode 100644
+index 0000000..150439a
+--- /dev/null
++++ b/tests/test_external_validation.py
+@@ -0,0 +1,158 @@
++from __future__ import annotations
++
++import json
++from pathlib import Path
++import tempfile
++import unittest
++
++import numpy as np
++import pandas as pd
++
++from external_validation import (
++    RAW_INPUT_COLS,
++    audit_model_inputs,
++    calculate_row_metrics,
++    extract_internal_performance,
++    predict_with_bundle,
++    summarize_predictions,
++    validate_external_rows,
++    write_markdown_report,
++)
++
++
++class DummyLogModel:
++    def predict(self, frame):
++        return np.log1p(np.full(len(frame), 100.0))
++
++
++class ProcessMissingnessModel:
++    def predict(self, frame):
++        tau = np.where(frame["is_spin_process"].isna(), 100.0, 200.0)
++        return np.log1p(tau)
++
++
++class ExternalValidationTests(unittest.TestCase):
++    def test_extract_internal_performance_uses_repository_bundle_key(self):
++        bundle = {"test_performance": {"R2_log": 0.89}}
++        self.assertEqual(extract_internal_performance(bundle), {"R2_log": 0.89})
++
++    def test_validate_external_rows_rejects_nonpositive_tau(self):
++        frame = pd.DataFrame(
++            {
++                "validation_id": ["bad"],
++                "Paper_ID": ["paper-a"],
++                "Tau_ms": [0.0],
++                "inclusion_tier": ["strict"],
++            }
++        )
++        with self.assertRaisesRegex(ValueError, "positive"):
++            validate_external_rows(frame)
++
++    def test_calculate_row_metrics_uses_log_and_factor_errors(self):
++        frame = pd.DataFrame({"Tau_ms": [100.0], "pred_tau_ms": [200.0]})
++        result = calculate_row_metrics(frame).iloc[0]
++
++        self.assertAlmostEqual(result["signed_error_ms"], 100.0)
++        self.assertAlmostEqual(result["absolute_error_ms"], 100.0)
++        self.assertAlmostEqual(result["ape_percent"], 100.0)
++        self.assertAlmostEqual(result["smape_percent"], 66.6666667, places=6)
++        self.assertAlmostEqual(result["factor_error"], 2.0)
++        self.assertAlmostEqual(
++            result["abs_log_error"], abs(np.log1p(200) - np.log1p(100))
++        )
++
++    def test_predict_with_bundle_converts_log1p_output_to_milliseconds(self):
++        frame = pd.DataFrame([{col: np.nan for col in RAW_INPUT_COLS} for _ in range(2)])
++        frame["Channel"] = ["P3HT", "P3HT"]
++        bundle = {
++            "model": DummyLogModel(),
++            "feature_columns": list(RAW_INPUT_COLS),
++        }
++
++        result = predict_with_bundle(frame, bundle)
++
++        np.testing.assert_allclose(result["pred_tau_ms"], [100.0, 100.0])
++
++    def test_prediction_matches_single_row_app_semantics(self):
++        row_a = {col: np.nan for col in RAW_INPUT_COLS}
++        row_b = {col: np.nan for col in RAW_INPUT_COLS}
++        row_a.update({"Channel": "P3HT", "Process": "Spin-coating"})
++        row_b.update({"Channel": "CPE-K", "Process": np.nan})
++        frame = pd.DataFrame([row_a, row_b])
++        bundle = {
++            "model": ProcessMissingnessModel(),
++            "feature_columns": list(RAW_INPUT_COLS) + ["is_spin_process"],
++        }
++
++        result = predict_with_bundle(frame, bundle)
++
++        np.testing.assert_allclose(result["pred_tau_ms"], [200.0, 100.0])
++
++    def test_audit_model_inputs_counts_missing_and_unseen_categories(self):
++        with tempfile.TemporaryDirectory() as tmp_dir:
++            schema_path = Path(tmp_dir) / "schema.json"
++            schema_path.write_text(
++                json.dumps(
++                    {
++                        "input_categorical_cols": ["Channel", "Anion"],
++                        "categorical_options": {
++                            "Channel": ["P3HT"],
++                            "Anion": ["TFSI"],
++                        },
++                    }
++                ),
++                encoding="utf-8",
++            )
++            row = {col: np.nan for col in RAW_INPUT_COLS}
++            row.update({"Channel": "new-polymer", "Anion": "TFSI"})
++
++            result = audit_model_inputs(pd.DataFrame([row]), schema_path).iloc[0]
++
++        self.assertEqual(result["missing_raw_input_count"], len(RAW_INPUT_COLS) - 2)
++        self.assertEqual(result["unseen_categorical_count"], 1)
++        self.assertEqual(result["unseen_categorical_fields"], "Channel")
++
++    def test_summary_keeps_strict_and_all_rows_separate(self):
++        frame = pd.DataFrame(
++            {
++                "Paper_ID": ["paper-a", "paper-b"],
++                "inclusion_tier": ["strict", "supplementary"],
++                "Tau_ms": [100.0, 1000.0],
++                "pred_tau_ms": [200.0, 500.0],
++            }
++        )
++        frame = calculate_row_metrics(frame)
++
++        summary = summarize_predictions(frame)
++
++        self.assertEqual(summary["strict"]["n_rows"], 1)
++        self.assertEqual(summary["strict"]["n_papers"], 1)
++        self.assertEqual(summary["all_eligible"]["n_rows"], 2)
++        self.assertAlmostEqual(summary["all_eligible"]["median_factor_error"], 2.0)
++
++    def test_markdown_report_does_not_require_optional_tabulate_dependency(self):
++        frame = pd.DataFrame(
++            {
++                "validation_id": ["row-a"],
++                "Paper_ID": ["paper-a"],
++                "inclusion_tier": ["strict"],
++                "Tau_ms": [100.0],
++                "pred_tau_ms": [200.0],
++                "missing_raw_input_count": [0],
++                "unseen_categorical_count": [0],
++            }
++        )
++        frame = calculate_row_metrics(frame)
++        summary = {"external_validation": summarize_predictions(frame)}
++
++        with tempfile.TemporaryDirectory() as tmp_dir:
++            output = Path(tmp_dir) / "report.md"
++            write_markdown_report(frame, summary, output)
++            text = output.read_text(encoding="utf-8")
++
++        self.assertIn("| validation_id", text)
++        self.assertIn("row-a", text)
++
++
++if __name__ == "__main__":
++    unittest.main()
+diff --git a/tests/test_p3ht_validation.py b/tests/test_p3ht_validation.py
+new file mode 100644
+index 0000000..2114c87
+--- /dev/null
++++ b/tests/test_p3ht_validation.py
+@@ -0,0 +1,390 @@
++from __future__ import annotations
++
++import unittest
++
++import numpy as np
++import pandas as pd
++
++from model_utils import add_engineered_features
++from p3ht_validation import (
++    add_input_similarity_scores,
++    calculate_similarity_score,
++    drop_physics_derived_features,
++    evaluate_candidates_grouped,
++    fill_external_physics_from_historical,
++    filter_external_p3ht,
++    fit_tau_floor,
++    fit_final_model,
++    make_group_splits,
++    prepare_historical_p3ht,
++    predict_with_trained_model,
++    restrict_historical_to_external_domain,
++    select_best_candidate,
++    select_nearest_domain_subset,
++    select_similarity_inputs,
++    summarize_external_predictions,
++)
++
++
++class P3HTValidationUnitTests(unittest.TestCase):
++    def test_external_filter_requires_date_material_tier_and_direct_target(self):
++        frame = pd.DataFrame(
++            {
++                "validation_id": ["keep", "old", "other", "supp", "proxy"],
++                "publication_date": [
++                    "2026-07-03",
++                    "2026-05-31",
++                    "2026-07-03",
++                    "2026-07-03",
++                    "2026-07-03",
++                ],
++                "Channel": ["P3HT", "P3HT", "PBTTT", "P3HT", "P3HT"],
++                "inclusion_tier": ["strict", "strict", "strict", "supplementary", "strict"],
++                "target_alignment": [
++                    "direct EPSC decay",
++                    "direct EPSC decay",
++                    "direct EPSC decay",
++                    "direct EPSC decay",
++                    "PPF decay proxy",
++                ],
++            }
++        )
++
++        result = filter_external_p3ht(frame)
++
++        self.assertEqual(result["validation_id"].tolist(), ["keep"])
++
++    def test_similarity_inputs_never_include_retention_target_or_post_fabrication_fields(self):
++        inputs = select_similarity_inputs()
++
++        self.assertNotIn("Tau_ms", inputs)
++        self.assertNotIn("Vth_V", inputs)
++        self.assertNotIn("On_off_ratio", inputs)
++        self.assertNotIn("Gate_pulse_width_ms", inputs)
++        self.assertNotIn("Pulse_number", inputs)
++        self.assertIn("Ion_diffusion", inputs)
++        self.assertIn("Channel", inputs)
++
++    def test_similarity_score_does_not_change_when_tau_changes(self):
++        historical = pd.DataFrame(
++            {
++                "Channel": ["P3HT", "P3HT"],
++                "Process": ["Spin-coating", "Drop-casting"],
++                "Spin_RPM": [1500.0, np.nan],
++                "Tau_ms": [100.0, 100000.0],
++            }
++        )
++        query = pd.Series(
++            {
++                "Channel": "P3HT",
++                "Process": "Spin-coating",
++                "Spin_RPM": 1500.0,
++                "Tau_ms": 275.0,
++            }
++        )
++
++        first = calculate_similarity_score(query, historical)
++        historical["Tau_ms"] = [1e9, 1e-6]
++        query["Tau_ms"] = 1e12
++        second = calculate_similarity_score(query, historical)
++
++        np.testing.assert_allclose(first, second)
++        self.assertGreater(first.iloc[0], first.iloc[1])
++
++    def test_summary_uses_actual_row_errors_and_reports_paper_count(self):
++        frame = pd.DataFrame(
++            {
++                "Paper_ID": ["paper-a", "paper-a", "paper-b"],
++                "Tau_ms": [100.0, 200.0, 1000.0],
++                "pred_tau_ms": [110.0, 180.0, 500.0],
++            }
++        )
++
++        result = summarize_external_predictions(frame)
++
++        self.assertEqual(result["n_rows"], 3)
++        self.assertEqual(result["n_papers"], 2)
++        self.assertAlmostEqual(result["mape_percent"], (10.0 + 10.0 + 50.0) / 3.0)
++        self.assertAlmostEqual(result["median_factor_error"], 10.0 / 9.0)
++
++    def test_physics_ablation_removes_diffusivity_family_only(self):
++        frame = pd.DataFrame(
++            {
++                "Ion_diffusion": [1.0],
++                "Ion_viscosity": [2.0],
++                "diffusion_viscosity_ratio": [0.5],
++                "ion_mobility_proxy": [0.5],
++                "log1p_ion_diffusion": [np.log1p(1.0)],
++                "Gate_voltage_V": [-2.0],
++                "Channel": ["P3HT"],
++            }
++        )
++
++        result = drop_physics_derived_features(frame)
++
++        self.assertNotIn("Ion_diffusion", result.columns)
++        self.assertNotIn("Ion_viscosity", result.columns)
++        self.assertNotIn("diffusion_viscosity_ratio", result.columns)
++        self.assertNotIn("ion_mobility_proxy", result.columns)
++        self.assertNotIn("log1p_ion_diffusion", result.columns)
++        self.assertIn("Gate_voltage_V", result.columns)
++        self.assertIn("Channel", result.columns)
++
++    def test_engineering_converts_diffusivity_into_physical_model_features(self):
++        frame = pd.DataFrame(
++            {
++                "Ion_diffusion": [4.0],
++                "Ion_viscosity": [2.0],
++                "Gate_pulse_width_ms": [1000.0],
++                "Cation_radius": [2.0],
++                "Anion_radius": [3.0],
++            }
++        )
++
++        result = add_engineered_features(frame)
++
++        self.assertAlmostEqual(result.loc[0, "log1p_ion_diffusion"], np.log1p(4.0))
++        self.assertAlmostEqual(result.loc[0, "diffusion_viscosity_ratio"], 2.0)
++        self.assertAlmostEqual(result.loc[0, "diffusion_length_proxy"], 2.0)
++        self.assertAlmostEqual(result.loc[0, "radius_diffusion_time_proxy"], 25.0 / 4.0)
++
++    def test_group_splits_keep_each_paper_in_one_side(self):
++        groups = pd.Series(["a", "a", "b", "b", "c", "c", "d", "d"])
++
++        splits = make_group_splits(groups, n_splits=4)
++
++        self.assertEqual(len(splits), 4)
++        for train_idx, valid_idx in splits:
++            train_groups = set(groups.iloc[train_idx])
++            valid_groups = set(groups.iloc[valid_idx])
++            self.assertTrue(train_groups.isdisjoint(valid_groups))
++
++    def test_historical_preparation_keeps_valid_p3ht_only(self):
++        frame = pd.DataFrame(
++            {
++                "Paper_ID": ["a", "b", "c", "d"],
++                "Channel": ["P3HT", "PBTTT", "P3HT", "P3HT"],
++                "Tau_ms": [100.0, 200.0, 0.0, np.nan],
++                "Process": ["spin coating", "spin coating", "spin coating", "spin coating"],
++            }
++        )
++
++        result = prepare_historical_p3ht(frame)
++
++        self.assertEqual(result["Paper_ID"].tolist(), ["a"])
++        self.assertEqual(result["Channel"].tolist(), ["P3HT"])
++        self.assertEqual(result["Process"].tolist(), ["Spin-coating"])
++
++    def test_tau_floor_is_fitted_from_training_rows_only(self):
++        training_tau = pd.Series([10.0, 20.0, 30.0, 40.0])
++
++        floor_before = fit_tau_floor(training_tau)
++        validation_with_extreme = pd.Series([1e-12, 1e12])
++        floor_after = fit_tau_floor(training_tau)
++
++        self.assertAlmostEqual(floor_before, floor_after)
++        self.assertNotEqual(floor_before, float(validation_with_extreme.quantile(0.01)))
++
++    def test_grouped_candidate_evaluation_uses_identical_folds_for_ablation(self):
++        rows = []
++        for paper_index in range(6):
++            for row_index in range(2):
++                rows.append(
++                    {
++                        "Paper_ID": f"paper-{paper_index}",
++                        "Channel": "P3HT",
++                        "Process": "Spin-coating",
++                        "Anion": "TFSI" if row_index == 0 else "BF4",
++                        "Ion_diffusion": 1.0 + row_index,
++                        "Ion_viscosity": 2.0 + row_index,
++                        "Tau_ms": 100.0 + 20.0 * paper_index + 10.0 * row_index,
++                    }
++                )
++        frame = pd.DataFrame(rows)
++        candidates = [
++            {
++                "candidate": "tiny",
++                "n_estimators": 10,
++                "max_features": 1.0,
++                "min_samples_leaf": 1,
++                "smoothing": 5,
++                "target_transform": "none",
++            }
++        ]
++
++        result = evaluate_candidates_grouped(frame, candidates, n_splits=3)
++
++        self.assertEqual(set(result["physics_variant"]), {"physics_on", "physics_off"})
++        on_folds = result.loc[result["physics_variant"] == "physics_on", "fold"].tolist()
++        off_folds = result.loc[result["physics_variant"] == "physics_off", "fold"].tolist()
++        self.assertEqual(on_folds, off_folds)
++        self.assertTrue(np.isfinite(result["mae_log1p"]).all())
++
++    def test_candidate_selection_ignores_external_errors(self):
++        cv_results = pd.DataFrame(
++            {
++                "candidate": ["a", "a", "b", "b"],
++                "physics_variant": ["physics_on"] * 4,
++                "mae_log1p": [0.2, 0.4, 0.5, 0.5],
++            }
++        )
++        external = pd.DataFrame(
++            {
++                "candidate": ["a", "b"],
++                "mape_percent": [1000.0, 0.1],
++            }
++        )
++
++        selected = select_best_candidate(cv_results, external_results=external)
++
++        self.assertEqual(selected["candidate"], "a")
++        self.assertAlmostEqual(selected["mean_mae_log1p"], 0.3)
++
++    def test_external_physics_fill_uses_ion_identity_without_target(self):
++        historical = pd.DataFrame(
++            {
++                "Cation": ["EMIM", "EMIM", "Li"],
++                "Anion": ["TFSI", "TFSI", "TFSI"],
++                "Ion_diffusion": [2.0, 4.0, 99.0],
++                "Ion_viscosity": [10.0, 14.0, 1.0],
++                "Anion_radius": [3.0, 3.0, 3.0],
++                "Cation_radius": [4.0, 4.0, 1.0],
++                "Tau_ms": [1.0, 1e9, 5.0],
++            }
++        )
++        external = pd.DataFrame(
++            {
++                "Cation": ["EMIM"],
++                "Anion": ["TFSI"],
++                "Ion_diffusion": [np.nan],
++                "Tau_ms": [406.0],
++            }
++        )
++
++        result = fill_external_physics_from_historical(external, historical)
++
++        self.assertAlmostEqual(result.loc[0, "Ion_diffusion"], 3.0)
++        self.assertAlmostEqual(result.loc[0, "Ion_viscosity"], 12.0)
++        self.assertEqual(result.loc[0, "physics_imputation_level"], "cation+anion")
++
++    def test_nearest_domain_subset_is_based_on_similarity_not_error(self):
++        frame = pd.DataFrame(
++            {
++                "validation_id": ["low-error-low-sim", "high-sim", "middle"],
++                "input_similarity_score": [0.2, 0.9, 0.5],
++                "ape_percent": [0.1, 100.0, 20.0],
++            }
++        )
++
++        result = select_nearest_domain_subset(frame, fraction=1 / 3)
++
++        self.assertEqual(result["validation_id"].tolist(), ["high-sim"])
++
++    def test_final_model_predicts_positive_tau_for_external_rows(self):
++        rows = []
++        for paper_index in range(6):
++            for anion, offset in [("TFSI", 0.0), ("BF4", 25.0)]:
++                rows.append(
++                    {
++                        "Paper_ID": f"paper-{paper_index}",
++                        "Channel": "P3HT",
++                        "Process": "Spin-coating",
++                        "Anion": anion,
++                        "Cation": "EMIM",
++                        "Ion_diffusion": 1.0 + offset / 100.0,
++                        "Ion_viscosity": 2.0,
++                        "Gate_pulse_width_ms": 1000.0,
++                        "Tau_ms": 100.0 + 10.0 * paper_index + offset,
++                    }
++                )
++        historical = pd.DataFrame(rows)
++        candidate = {
++            "candidate": "tiny",
++            "n_estimators": 10,
++            "max_features": 1.0,
++            "min_samples_leaf": 1,
++            "smoothing": 5,
++            "target_transform": "none",
++        }
++        trained = fit_final_model(historical, candidate, use_physics=True)
++        external = pd.DataFrame(
++            {
++                "Channel": ["P3HT"],
++                "Process": ["Spin-coating"],
++                "Anion": ["TFSI"],
++                "Cation": ["EMIM"],
++                "Ion_diffusion": [1.0],
++                "Ion_viscosity": [2.0],
++                "Gate_pulse_width_ms": [1000.0],
++            }
++        )
++
++        prediction = predict_with_trained_model(trained, external)
++
++        self.assertEqual(len(prediction), 1)
++        self.assertGreater(prediction[0], 0.0)
++        self.assertNotIn("Gate_voltage_V", trained["feature_columns"])
++        self.assertNotIn("Gate_pulse_width_ms", trained["feature_columns"])
++        self.assertNotIn("total_gate_dose", trained["feature_columns"])
++
++    def test_input_similarity_density_is_target_blind(self):
++        historical = pd.DataFrame(
++            {
++                "Channel": ["P3HT", "P3HT"],
++                "Process": ["Spin-coating", "Drop-casting"],
++                "Tau_ms": [100.0, 1e9],
++            }
++        )
++        external = pd.DataFrame(
++            {
++                "validation_id": ["case"],
++                "Channel": ["P3HT"],
++                "Process": ["Spin-coating"],
++                "Tau_ms": [200.0],
++            }
++        )
++
++        first = add_input_similarity_scores(external, historical, neighbors=1)
++        historical["Tau_ms"] = [1e-9, 1e12]
++        external["Tau_ms"] = [1e8]
++        second = add_input_similarity_scores(external, historical, neighbors=1)
++
++        self.assertAlmostEqual(
++            first.loc[0, "input_similarity_score"],
++            second.loc[0, "input_similarity_score"],
++        )
++
++    def test_external_domain_restriction_uses_inputs_not_tau(self):
++        historical = pd.DataFrame(
++            {
++                "Paper_ID": [f"p{i}" for i in range(8)],
++                "Channel": ["P3HT"] * 8,
++                "Process": ["Spin-coating"] * 6 + ["Drop-casting"] * 2,
++                "Cation": ["EMIM"] * 6 + ["Li"] * 2,
++                "polymer": ["PVDF-HFP"] * 6 + ["PEO"] * 2,
++                "Pulse_number": [1.0] * 6 + [10.0] * 2,
++                "Tau_ms": [10.0, 20.0, 30.0, 40.0, 50.0, 60.0, 1e6, 1e9],
++            }
++        )
++        external = pd.DataFrame(
++            {
++                "Channel": ["P3HT"],
++                "Process": ["Spin-coating"],
++                "Cation": ["EMIM"],
++                "polymer": ["PVDF-HFP"],
++                "Pulse_number": [1.0],
++                "Tau_ms": [406.0],
++            }
++        )
++
++        first = restrict_historical_to_external_domain(historical, external, min_papers=5)
++        historical["Tau_ms"] = historical["Tau_ms"] * 1e12
++        external["Tau_ms"] = 1e-12
++        second = restrict_historical_to_external_domain(historical, external, min_papers=5)
++
++        self.assertEqual(first["Paper_ID"].tolist(), [f"p{i}" for i in range(6)])
++        self.assertEqual(first["Paper_ID"].tolist(), second["Paper_ID"].tolist())
++
++
++if __name__ == "__main__":
++    unittest.main()
+diff --git a/validation_results/p3ht_external_predictions.csv b/validation_results/p3ht_external_predictions.csv
+new file mode 100644
+index 0000000..cf867d8
+--- /dev/null
++++ b/validation_results/p3ht_external_predictions.csv
+@@ -0,0 +1,4 @@
++validation_id,Paper_ID,paper_title,doi,publication_date,source_url,inclusion_tier,target_alignment,tau_definition,tau_source,Tau_ms,extraction_notes,Channel,Solvent,Concentration_mg_ml,Process,Spin_RPM,Annealing_temp_C,Annealing_time_h,Ion_type,wt,polymer,Ion_diffusion,Ion_viscosity,Anion_radius,Cation_radius,Cation,Anion,Gate_voltage_V,Drain_voltage_V,Gate_pulse_width_ms,Pulse_number,Electrode_type,Vth_V,On_off_ratio,Vth_window_V,Operating_temp_C,input_provenance_notes,input_similarity_score,physics_imputation_level,pred_tau_ms,pred_tau_ms_physics_off,physics_on_ape_percent,physics_on_factor_error,physics_off_ape_percent,physics_off_factor_error,ape_percent,factor_error
++wan2026_bf4,10.1002/smll.74398,Anion-Engineered Organic Electrochemical Transistors With Multi-Timescale Synaptic Dynamics for Task-Adaptive Spiking Neural Networks,10.1002/smll.74398,2026-07-03,https://onlinelibrary.wiley.com/doi/10.1002/smll.74398,strict,direct EPSC decay,Single-exponential EPSC decay after one gate pulse,main text and decay-fit figure,275,BF4 decay constant reported as 0.275 s; converted to 275 ms,P3HT,,,Spin-coating,1500.0,130.0,0.083333,ion gel,,PVDF-HFP,3.824,25.2,0.225,0.298,EMIM,BF4,-2.0,-1.0,2000.0,1,Cr/Au,,,,,Device fabrication and electrical conditions reported in the paper; unavailable fields remain blank,0.7785401913121172,cation+anion,1601.058346330178,1418.1719674826977,482.20303502915567,5.8220303502915565,415.69889726643555,5.156988972664355,482.20303502915567,5.8220303502915565
++wan2026_tfsi,10.1002/smll.74398,Anion-Engineered Organic Electrochemical Transistors With Multi-Timescale Synaptic Dynamics for Task-Adaptive Spiking Neural Networks,10.1002/smll.74398,2026-07-03,https://onlinelibrary.wiley.com/doi/10.1002/smll.74398,strict,direct EPSC decay,Single-exponential EPSC decay after one gate pulse,main text and decay-fit figure,406,TFSI decay constant reported as 0.406 s; converted to 406 ms,P3HT,,,Spin-coating,1500.0,130.0,0.083333,ion gel,,PVDF-HFP,1.764,45.625,0.27,0.298,EMIM,TFSI,-2.0,-1.0,2000.0,1,Cr/Au,,,,,Device fabrication and electrical conditions reported in the paper; unavailable fields remain blank,0.8889530182903049,cation+anion,1071.735485588562,1073.4692327702544,163.97425753412855,2.6397425753412853,164.40128885966857,2.6440128885966856,163.97425753412855,2.6397425753412853
++wan2026_meso4,10.1002/smll.74398,Anion-Engineered Organic Electrochemical Transistors With Multi-Timescale Synaptic Dynamics for Task-Adaptive Spiking Neural Networks,10.1002/smll.74398,2026-07-03,https://onlinelibrary.wiley.com/doi/10.1002/smll.74398,strict,direct EPSC decay,Single-exponential EPSC decay after one gate pulse,main text and decay-fit figure,1059,MeSO4 decay constant reported as 1.059 s; converted to 1059 ms,P3HT,,,Spin-coating,1500.0,130.0,0.083333,ion gel,,PVDF-HFP,0.105,686.0,0.303,0.292,EMIM,MeSO4,-2.0,-1.0,2000.0,1,Cr/Au,,,,,Device fabrication and electrical conditions reported in the paper; unavailable fields remain blank,0.7721120157965241,anion,1155.05771154484,1413.5514907519105,9.070605433884797,1.090706054338848,33.47983859791411,1.3347983859791412,9.070605433884797,1.090706054338848
+diff --git a/validation_results/p3ht_external_report.md b/validation_results/p3ht_external_report.md
+new file mode 100644
+index 0000000..71918ce
+--- /dev/null
++++ b/validation_results/p3ht_external_report.md
+@@ -0,0 +1,28 @@
++# P3HT paper-grouped external validation
++
++The model candidate was selected only by paper-grouped cross-validation on historical P3HT data. External targets were used after model selection.
++
++## Historical grouped validation
++
++Physics-on best candidate: et_leaf2_mf050_s3
++Physics-off best candidate: et_leaf4_mf065_s10
++Physics-on mean MAE in log1p space: 1.8276
++Physics-off mean MAE in log1p space: 1.8345
++
++## External P3HT result
++
++All eligible rows: 3 from 1 paper
++All-row MAPE: 218.42%
++All-row median factor error: 2.640x
++Highest input-similarity third MAPE: 163.97%
++Highest input-similarity third rows: wan2026_tfsi
++
++The highest-similarity subset is selected from materials and process inputs only. It is a scope-limited case result, not the overall external error.
++
++## Row results
++
++| validation_id | Anion | Tau_ms | pred_tau_ms | ape_percent | pred_tau_ms_physics_off | physics_off_ape_percent | input_similarity_score | physics_imputation_level |
++| --- | --- | --- | --- | --- | --- | --- | --- | --- |
++| wan2026_bf4 | BF4 | 275.0000 | 1601.0583 | 482.2030 | 1418.1720 | 415.6989 | 0.7785 | cation+anion |
++| wan2026_tfsi | TFSI | 406.0000 | 1071.7355 | 163.9743 | 1073.4692 | 164.4013 | 0.8890 | cation+anion |
++| wan2026_meso4 | MeSO4 | 1059.0000 | 1155.0577 | 9.0706 | 1413.5515 | 33.4798 | 0.7721 | anion |
+diff --git a/validation_results/p3ht_external_summary.json b/validation_results/p3ht_external_summary.json
+new file mode 100644
+index 0000000..0e02d8e
+--- /dev/null
++++ b/validation_results/p3ht_external_summary.json
+@@ -0,0 +1,62 @@
++{
++  "historical_p3ht_rows": 431,
++  "historical_p3ht_papers": 62,
++  "domain_training_rows": 165,
++  "domain_training_papers": 21,
++  "domain_filters": [
++    "Process=spin-coating",
++    "Cation=emim",
++    "polymer contains pvdf-hfp"
++  ],
++  "external_publication_start": "2026-06-01",
++  "selected_physics_on": {
++    "candidate": "et_leaf2_mf050_s3",
++    "physics_variant": "physics_on",
++    "mean_mae_log1p": 1.8276415258725252,
++    "std_mae_log1p": 0.22227664307644818,
++    "mean_mape_percent": 491.3300735987723
++  },
++  "selected_physics_off": {
++    "candidate": "et_leaf4_mf065_s10",
++    "physics_variant": "physics_off",
++    "mean_mae_log1p": 1.8345379480084283,
++    "std_mae_log1p": 0.26339909015661034,
++    "mean_mape_percent": 459.71188375495694
++  },
++  "physics_ablation_grouped_cv": {
++    "physics_on_mean_mae_log1p": 1.8276415258725252,
++    "physics_off_mean_mae_log1p": 1.8345379480084283
++  },
++  "external_physics_on_all": {
++    "n_rows": 3,
++    "n_papers": 1,
++    "mape_percent": 218.41596599905634,
++    "median_ape_percent": 163.97425753412855,
++    "median_factor_error": 2.6397425753412853,
++    "mae_log1p": 0.9381814915935051,
++    "rmse_log1p": 1.160403966606889
++  },
++  "external_physics_on_nearest_third": {
++    "n_rows": 1,
++    "n_papers": 1,
++    "mape_percent": 163.97425753412855,
++    "median_ape_percent": 163.97425753412855,
++    "median_factor_error": 2.6397425753412853,
++    "mae_log1p": 0.9691540082406176,
++    "rmse_log1p": 0.9691540082406176
++  },
++  "external_physics_off_all": {
++    "n_rows": 3,
++    "n_papers": 1,
++    "mape_percent": 204.52667490800604,
++    "median_ape_percent": 164.40128885966857,
++    "median_factor_error": 2.6440128885966856,
++    "mae_log1p": 0.9655801648661804,
++    "rmse_log1p": 1.111578471540267
++  },
++  "nearest_validation_ids": [
++    "wan2026_tfsi"
++  ],
++  "selection_rule": "candidate chosen by mean paper-grouped historical MAE_log1p; external targets excluded",
++  "nearest_subset_rule": "top one-third by mean five-neighbor input similarity; Tau_ms and prediction errors excluded"
++}
+\ No newline at end of file
+diff --git a/validation_results/p3ht_grouped_cv.csv b/validation_results/p3ht_grouped_cv.csv
+new file mode 100644
+index 0000000..163edaf
+--- /dev/null
++++ b/validation_results/p3ht_grouped_cv.csv
+@@ -0,0 +1,81 @@
++candidate,physics_variant,fold,train_rows,valid_rows,train_papers,valid_papers,tau_floor_ms,mae_log1p,rmse_log1p,median_factor_error,mape_percent
++et_leaf1_mf035_s3,physics_on,1,130,33,19,2,61.11608,2.182521375379498,2.2279238151555187,8.329785099120675,880.3408767304701
++et_leaf1_mf035_s3,physics_on,2,130,33,17,4,56.46608,2.1970736640895554,2.6932107134430545,5.804434611996825,1893.787107269168
++et_leaf1_mf035_s3,physics_on,3,130,33,17,4,56.46608,1.6304993822247218,1.8587651605807867,2.813678915823892,196.80057210177193
++et_leaf1_mf035_s3,physics_on,4,130,33,16,5,80.62,2.1170247149894,2.505009720762014,6.084127462378895,541.3735971318342
++et_leaf1_mf035_s3,physics_on,5,130,33,15,6,56.46608,1.5664620892237944,1.7435097002453996,5.533678988493735,131.49566400574673
++et_leaf1_mf035_s3,physics_off,1,130,33,19,2,61.11608,2.310833034185196,2.3484881767496484,9.385141398191116,1006.9070730833755
++et_leaf1_mf035_s3,physics_off,2,130,33,17,4,56.46608,2.173967656036133,2.6761945368786932,6.336573507908489,1790.6796899688247
++et_leaf1_mf035_s3,physics_off,3,130,33,17,4,56.46608,1.550719592594797,1.74212021167395,3.122854829968053,193.253465789213
++et_leaf1_mf035_s3,physics_off,4,130,33,16,5,80.62,2.0492968610634588,2.5221896966552997,5.424420813278965,370.7294399570616
++et_leaf1_mf035_s3,physics_off,5,130,33,15,6,56.46608,1.639745538097034,1.7931444712133453,5.085398727828674,190.17856542076353
++et_leaf1_mf065_s5,physics_on,1,130,33,19,2,61.11608,1.8099524318530884,1.8533688573059135,5.642759381045533,567.0462561203435
++et_leaf1_mf065_s5,physics_on,2,130,33,17,4,56.46608,2.3288924111419216,2.832689766896857,8.857798799243406,2272.3484535140587
++et_leaf1_mf065_s5,physics_on,3,130,33,17,4,56.46608,1.6311919747725854,1.889538971841746,2.749240793476934,224.51409599169892
++et_leaf1_mf065_s5,physics_on,4,130,33,16,5,80.62,2.1540794659939855,2.5476616569380837,7.19117824958115,509.6966025216243
++et_leaf1_mf065_s5,physics_on,5,130,33,15,6,56.46608,1.6166215082714683,1.790809030556644,4.918034669393846,147.13086207855588
++et_leaf1_mf065_s5,physics_off,1,130,33,19,2,61.11608,1.8952935142285232,1.9358110788217915,6.133557858153962,625.5901360863861
++et_leaf1_mf065_s5,physics_off,2,130,33,17,4,56.46608,2.145924079703837,2.597545178645688,7.1319995779849785,1546.33519359965
++et_leaf1_mf065_s5,physics_off,3,130,33,17,4,56.46608,1.5737338082932504,1.8092263807119637,2.887261134355999,262.25341905095974
++et_leaf1_mf065_s5,physics_off,4,130,33,16,5,80.62,2.1020944738349456,2.5643296973026093,5.974592081945649,389.9407783695233
++et_leaf1_mf065_s5,physics_off,5,130,33,15,6,56.46608,1.7290384303838233,1.8812661957720198,4.962795416175724,208.5285317798007
++et_leaf1_mf100_s10,physics_on,1,130,33,19,2,61.11608,1.753448070693177,1.798044352555534,5.330621068714947,530.2220452608636
++et_leaf1_mf100_s10,physics_on,2,130,33,17,4,56.46608,2.2247996070213194,2.6974603204483927,7.586341314645315,1674.9317337318173
++et_leaf1_mf100_s10,physics_on,3,130,33,17,4,56.46608,1.658711314954911,1.9555278309728734,2.622808301098309,241.11224686750742
++et_leaf1_mf100_s10,physics_on,4,130,33,16,5,80.62,2.194452644983066,2.6067668164324598,7.87821884822592,489.9818657877796
++et_leaf1_mf100_s10,physics_on,5,130,33,15,6,56.46608,1.6439847898358386,1.833617224002107,4.409735897780739,144.56599282612112
++et_leaf1_mf100_s10,physics_off,1,130,33,19,2,61.11608,1.6853475088441323,1.7272719141905426,4.932831904502949,485.4339454827587
++et_leaf1_mf100_s10,physics_off,2,130,33,17,4,56.46608,2.3024732531142496,2.7577147926819863,8.284767782337513,1850.2516882632176
++et_leaf1_mf100_s10,physics_off,3,130,33,17,4,56.46608,1.5771369754239635,1.847128141633345,2.6722595698304437,244.75962040876
++et_leaf1_mf100_s10,physics_off,4,130,33,16,5,80.62,2.1460190638133403,2.5814297424301733,6.592161187281557,417.39895933967506
++et_leaf1_mf100_s10,physics_off,5,130,33,15,6,56.46608,1.727484503509251,1.910749862322097,4.694469270414105,170.59127694971752
++et_leaf2_mf050_s3,physics_on,1,130,33,19,2,61.11608,1.9748526636722696,2.0090608393069687,6.552026981061289,680.0236049854395
++et_leaf2_mf050_s3,physics_on,2,130,33,17,4,56.46608,1.912724219959973,2.4000339581395145,4.530990503211318,1010.0798413846607
++et_leaf2_mf050_s3,physics_on,3,130,33,17,4,56.46608,1.6663338414608204,1.895487554444857,3.443311012944195,210.57193361140705
++et_leaf2_mf050_s3,physics_on,4,130,33,16,5,80.62,2.056891492351982,2.4790755285759305,5.821162121649015,422.44832740699906
++et_leaf2_mf050_s3,physics_on,5,130,33,15,6,56.46608,1.5274054119175795,1.702711080249765,4.455804109755838,133.52666060535498
++et_leaf2_mf050_s3,physics_off,1,130,33,19,2,61.11608,2.194114854087542,2.223479537392925,8.072684252163745,868.173984702135
++et_leaf2_mf050_s3,physics_off,2,130,33,17,4,56.46608,1.8975000543996299,2.3543390629724636,4.600281401293151,981.3029068861266
++et_leaf2_mf050_s3,physics_off,3,130,33,17,4,56.46608,1.6070059338047535,1.791605643601822,3.5703881037044347,226.35967281749168
++et_leaf2_mf050_s3,physics_off,4,130,33,16,5,80.62,2.023007411880322,2.4975363028912123,5.213551109264401,338.1468141002316
++et_leaf2_mf050_s3,physics_off,5,130,33,15,6,56.46608,1.637985954096507,1.7726174126600585,4.737782729662181,196.0313475743216
++et_leaf2_mf080_s5,physics_on,1,130,33,19,2,61.11608,2.174560770304902,2.206757631692466,8.036639531586252,854.5276351423618
++et_leaf2_mf080_s5,physics_on,2,130,33,17,4,56.46608,1.9885596792736755,2.44900822055077,4.865404464666345,1060.4203670737813
++et_leaf2_mf080_s5,physics_on,3,130,33,17,4,56.46608,1.588142230513521,1.823244859591739,2.9493758612913856,185.03255196693593
++et_leaf2_mf080_s5,physics_on,4,130,33,16,5,80.62,2.1343182766460127,2.542745855733885,6.192011962385334,458.8391477775097
++et_leaf2_mf080_s5,physics_on,5,130,33,15,6,56.46608,1.6395060539429385,1.8261238273545957,4.87496247007546,131.4392978355298
++et_leaf2_mf080_s5,physics_off,1,130,33,19,2,61.11608,2.0455084730220867,2.0768462225989452,7.34046163337115,733.8856418778886
++et_leaf2_mf080_s5,physics_off,2,130,33,17,4,56.46608,2.0379974002568657,2.4754246471442545,5.008426465270037,1092.48415826254
++et_leaf2_mf080_s5,physics_off,3,130,33,17,4,56.46608,1.523449153517068,1.733899369553967,3.291516341449311,207.79168507560325
++et_leaf2_mf080_s5,physics_off,4,130,33,16,5,80.62,2.1167476468541984,2.5671263264759463,6.601220961785045,394.22872554658255
++et_leaf2_mf080_s5,physics_off,5,130,33,15,6,56.46608,1.64965600342669,1.8054047956235613,3.8559288407779193,180.5125150197446
++et_leaf4_mf065_s10,physics_on,1,130,33,19,2,61.11608,2.1751799761323705,2.205739052493709,7.9843349082699815,852.1335902076539
++et_leaf4_mf065_s10,physics_on,2,130,33,17,4,56.46608,1.8320268074225443,2.3057638741352835,4.661396147797655,726.3458353636174
++et_leaf4_mf065_s10,physics_on,3,130,33,17,4,56.46608,1.588963711185157,1.8300716355622302,3.0401733841831846,164.3191959415558
++et_leaf4_mf065_s10,physics_on,4,130,33,16,5,80.62,2.050085315002413,2.4298685385718293,6.503816845147415,452.7853177977213
++et_leaf4_mf065_s10,physics_on,5,130,33,15,6,56.46608,1.523553250444374,1.686363655631331,3.4885339031100138,144.16649300371245
++et_leaf4_mf065_s10,physics_off,1,130,33,19,2,61.11608,2.1635623018051326,2.193421440127749,8.224432238649266,838.5986669929871
++et_leaf4_mf065_s10,physics_off,2,130,33,17,4,56.46608,1.8663426145155149,2.3096647753333093,4.824844397295671,772.7280728988873
++et_leaf4_mf065_s10,physics_off,3,130,33,17,4,56.46608,1.620788713477558,1.825087498215072,3.6105866405212352,188.3096202922091
++et_leaf4_mf065_s10,physics_off,4,130,33,16,5,80.62,1.997369366435669,2.4654637335608003,5.81117521337095,330.71630306116333
++et_leaf4_mf065_s10,physics_off,5,130,33,15,6,56.46608,1.5246267438082666,1.6617742409941676,3.21734377997396,168.20675552953796
++et_leaf1_mf065_quantile,physics_on,1,130,33,19,2,61.11608,1.8239685441273088,1.8663260028764024,5.714285714285716,575.8448412049244
++et_leaf1_mf065_quantile,physics_on,2,130,33,17,4,56.46608,2.30620143544701,2.833582442970529,6.110075959879322,2214.1781906736514
++et_leaf1_mf065_quantile,physics_on,3,130,33,17,4,56.46608,1.936097727684675,2.162133621244884,5.270378810457165,312.11052397967484
++et_leaf1_mf065_quantile,physics_on,4,130,33,16,5,80.62,2.18426968976888,2.6428842557045584,8.684762636869845,476.06353186669213
++et_leaf1_mf065_quantile,physics_on,5,130,33,15,6,56.46608,2.057495291977507,2.310565262863481,13.402212536406045,105.40810528534938
++et_leaf1_mf065_quantile,physics_off,1,130,33,19,2,61.11608,1.8216465034710179,1.865263881361552,5.714285714285716,575.2966953826447
++et_leaf1_mf065_quantile,physics_off,2,130,33,17,4,56.46608,2.218357016899819,2.7527160311515333,4.892086330935249,1919.4423151459412
++et_leaf1_mf065_quantile,physics_off,3,130,33,17,4,56.46608,1.6795660110405695,1.7792970366711067,4.200878474400872,248.92574221347587
++et_leaf1_mf065_quantile,physics_off,4,130,33,16,5,80.62,2.1936229115768797,2.7486989666886243,5.405405405405403,450.99212643878656
++et_leaf1_mf065_quantile,physics_off,5,130,33,15,6,56.46608,1.7371442284233365,1.9619703973914444,5.955411753710895,112.92790891676037
++et_leaf2_mf065_quantile,physics_on,1,130,33,19,2,61.11608,1.8872407000637927,1.922252882077194,5.981337421969123,613.5742776350285
++et_leaf2_mf065_quantile,physics_on,2,130,33,17,4,56.46608,2.051382998806652,2.5925949801522488,3.5179873190641286,1386.5661937046834
++et_leaf2_mf065_quantile,physics_on,3,130,33,17,4,56.46608,1.7198882843274037,2.0193119573188625,3.7692219182655604,199.00327243573335
++et_leaf2_mf065_quantile,physics_on,4,130,33,16,5,80.62,2.074758775613658,2.5567904233362815,5.379896430528698,344.9091846214595
++et_leaf2_mf065_quantile,physics_on,5,130,33,15,6,56.46608,1.790733301242522,2.025182095582211,7.547080488907173,102.229339487594
++et_leaf2_mf065_quantile,physics_off,1,130,33,19,2,61.11608,1.8530117730267388,1.8878769384885519,5.749962732356786,588.4680029503456
++et_leaf2_mf065_quantile,physics_off,2,130,33,17,4,56.46608,1.998648853859397,2.5551741076091514,3.850617665484518,1295.073053812473
++et_leaf2_mf065_quantile,physics_off,3,130,33,17,4,56.46608,1.6460269207861247,1.8997800378458494,3.620091750306202,193.99046367908426
++et_leaf2_mf065_quantile,physics_off,4,130,33,16,5,80.62,2.10265486655537,2.6669158371153894,4.903946356637681,305.1667899692818
++et_leaf2_mf065_quantile,physics_off,5,130,33,15,6,56.46608,1.678174678686014,1.8692690221797208,5.014749024533744,140.68002986456966
+-- 
+2.51.1
+
